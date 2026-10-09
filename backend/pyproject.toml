@@ -5,15 +5,15 @@ description = "OSS guardrail-robustness benchmark built on PyRIT"
 requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }
 dependencies = [
-  "fastapi==0.115.6",
+  "fastapi>=0.133.0",
   "uvicorn[standard]==0.34.0",
   "sqlmodel==0.0.22",
-  "pydantic==2.10.4",
+  "pydantic>=2.11.5",
   "pydantic-settings==2.7.0",
   "httpx==0.28.1",
   "cryptography==44.0.0",
   "numpy==2.2.1",
-  "scipy==1.15.0",
+  "scipy>=1.15.3",
   "pyyaml==6.0.2",
   "keyring==25.5.0",
   "duckdb>=1.1",
