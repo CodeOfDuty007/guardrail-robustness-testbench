@@ -21,6 +21,9 @@ async def lifespan(_: FastAPI):
     install_log_redaction()
     init_telemetry()
     init_corpus()
+    ui = "built UI served here" if (DIST / "index.html").exists() else "UI not built: run `cd frontend && npm run dev` -> http://localhost:5173"
+    bar = "=" * 64
+    print(f"\n{bar}\n  Red-Team Arcade is running locally\n\n  Open:  http://localhost:8000\n  API:   http://localhost:8000/docs\n  ({ui})\n{bar}\n", flush=True)
     yield
 
 
