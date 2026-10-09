@@ -267,21 +267,21 @@ target model.
 The two halves of this system have different deployment requirements and are deployed
 separately.
 
-**Frontend.** The React application in `frontend/` is a static single-page application and
-is suitable for deployment on Vercel or an equivalent static host:
+**Frontend.** The React application in `frontend/` is a static single-page application. It calls
+relative `/api` and `/ws` paths, so it must be served from a host that also routes those paths
+to the backend (as the Vite dev proxy, `frontend/nginx.conf`, and the backend's built-in static
+serving do). A static-only host such as Vercel has no backend behind `/api`, and every data call
+returns 404, so it is not a suitable target on its own. To serve it separately from the backend,
+add a reverse proxy for `/api` and `/ws`, and configure CORS on the backend (`cors_origins` in
+`backend/app/config.py`) to permit the frontend's origin.
 
 ```bash
 cd frontend
-npm run build
+npm run build   # output in frontend/dist/, also served by the backend at http://localhost:8000
 ```
 
-The build output in `frontend/dist/` can be deployed directly. When deployed separately from
-the backend, set the API base URL the frontend should target (see `frontend/src/lib/`) to
-the backend's public address, and configure CORS on the backend (`cors_origins` in
-`backend/app/config.py`) to permit the deployed frontend's origin.
-
 **Backend.** The FastAPI backend is intentionally not serverless-compatible and should not
-be deployed to Vercel or a similar function-per-request platform. It depends on:
+be deployed to a function-per-request platform such as Vercel. It depends on:
 
 - local SQLite files (`telemetry.db`, `corpus/corpus.db`) that must persist across requests
   and survive restarts,
