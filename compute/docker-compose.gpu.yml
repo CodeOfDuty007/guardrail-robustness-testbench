@@ -1,0 +1,16 @@
+# Run THIS on the GPU host (needs nvidia-container-toolkit). Then add http://<host>:11434 on the GPU Nodes page.
+# Bind to localhost and reach it with `ssh -L 11434:localhost:11434 user@gpu` unless the network is trusted.
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports: [ "127.0.0.1:11434:11434" ]
+    volumes: [ "ollama:/root/.ollama" ]
+    deploy: { resources: { reservations: { devices: [ { driver: nvidia, count: all, capabilities: [ gpu ] } ] } } }
+  # Optional high-throughput alternative (set HF_TOKEN for gated weights):
+  # vllm:
+  #   image: vllm/vllm-openai:latest
+  #   command: ["--model", "meta-llama/Meta-Llama-3-8B-Instruct", "--max-model-len", "4096"]
+  #   environment: { HUGGING_FACE_HUB_TOKEN: "${HF_TOKEN}" }
+  #   ports: [ "127.0.0.1:8001:8000" ]
+  #   deploy: { resources: { reservations: { devices: [ { driver: nvidia, count: all, capabilities: [ gpu ] } ] } } }
+volumes: { ollama: {} }

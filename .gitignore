@@ -1,0 +1,17 @@
+corpus/
+datasets/*
+!datasets/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+.env
+.venv/
+node_modules/
+frontend/dist/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+backend/.tmp/
+.DS_Store
+*.pyc

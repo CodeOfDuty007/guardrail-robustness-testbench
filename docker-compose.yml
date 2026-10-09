@@ -1,0 +1,16 @@
+# CPU stack: backend + frontend + Ollama. Works with the built-in mock target with zero keys.
+services:
+  backend:
+    build: { context: ., dockerfile: backend/Dockerfile }
+    environment: { RT_OPERATOR_NAME: "${RT_OPERATOR_NAME:-operator}" }
+    volumes: [ "rt-data:/data", "./datasets:/datasets:ro" ]
+    ports: [ "8000:8000" ]
+  frontend:
+    build: { context: ., dockerfile: frontend/Dockerfile }
+    ports: [ "8080:80" ]
+    depends_on: [ backend ]
+  ollama:
+    image: ollama/ollama:latest
+    volumes: [ "ollama:/root/.ollama" ]
+    ports: [ "11434:11434" ]
+volumes: { rt-data: {}, ollama: {} }

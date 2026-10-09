@@ -1,0 +1,36 @@
+/* Sega design system (awesome-design-skills/sega): VT323 pixel face, 0px corners,
+   press-in offset-shadow controls, rainbow-ringed "cabinet trim" cards.
+   Sega tokens kept verbatim: primary #4502FF, secondary #FFDA14, success #16A34A, warning #D97706, danger #DC2626.
+   Adaptation: the spec (§12) calls for an ops console, so surfaces are a dark cabinet; the skill's
+   #FFFFFF surface / #111827 text are used for light mode and for text-on-yellow. */
+:root {
+  --primary: #4502ff;
+  --secondary: #ffda14;
+  --success: #16a34a;
+  --warning: #d97706;
+  --danger: #dc2626;
+  --bg: #0b0a1f;
+  --surface: #14122e;
+  --surface-2: #1c1a3d;
+  --border: #2e2a66;
+  --text: #f5f5ff;
+  --muted: #a9a6d6;
+  --ink: #111827;           /* text on yellow */
+  --primary-text: #b9a8ff;  /* AA-contrast variant of primary for text on dark */
+  --focus: #ffda14;
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+  --fs-1: 13px; --fs-2: 15px; --fs-3: 17px; --fs-4: 21px; --fs-5: 27px; --fs-6: 35px;
+  --pixel: 'VT323', 'JetBrains Mono', monospace;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --rainbow: 0 0 0 3px var(--surface), 0 0 0 6px #e11d48, 0 0 0 9px var(--secondary), 0 0 0 12px var(--success), 0 0 0 15px var(--primary);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --bg: #f4f2ff; --surface: #ffffff; --surface-2: #ece9ff; --border: #c9c2f5;
+    --text: #111827; --muted: #4b5563; --primary-text: #4502ff;
+  }
+}
+:root[data-theme='light'] {
+  --bg: #f4f2ff; --surface: #ffffff; --surface-2: #ece9ff; --border: #c9c2f5;
+  --text: #111827; --muted: #4b5563; --primary-text: #4502ff;
+}
