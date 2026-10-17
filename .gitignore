@@ -1,4 +1,5 @@
-corpus/
+/corpus/
+.signing_key
 datasets/*
 !datasets/.gitkeep
 *.db
