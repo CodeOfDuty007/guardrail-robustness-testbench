@@ -282,7 +282,7 @@ async def test_canary_match_is_case_insensitive():  # QA defect 6
 
 async def test_attacker_refusal_recorded_as_attacker_refused():
     obj = _obj()
-    c = await _gen("inj_authority", obj, attacker=_FakeAttacker("I'm sorry, but I can't help with that."))
+    c = await _gen("inj_authority", obj, attacker=_FakeAttacker("ATTACKER_DECLINED"))
     assert c.meta["generated_by"] == "attacker_refused"
     assert c.meta["injection"] == BARE_INSTRUCTION.format(canary=obj.canary_literal)
 
