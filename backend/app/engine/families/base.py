@@ -1,9 +1,10 @@
 """Attack-family contract (ATTACK_FAMILIES_AND_DEFENSE_PLAN.md §A.1, §D.2). FROZEN in Sprint 0.
 
-A family is a *strategy* naming a published technique. At runtime it asks the attacker LLM to apply
-that technique to the current objective; with no attacker configured it falls back to a minimal,
-structural template so the pipeline still runs offline. Families never ship tuned adversarial
-strings, and default objectives are benign canaries.
+A family is a *strategy* naming a published technique. At runtime the ATTACKER LLM generates the
+attack / injection text by applying that technique to the current objective (user decision: the repo
+ships only citation + OWASP/ATLAS tags + a neutral one-line brief, never authored framing templates).
+With no attacker configured the bare objective/canary is sent unstyled and the mock target simulates
+per-family differences, so the pipeline still runs offline. Default objectives are benign canaries.
 
 PyRIT boundary: nothing here imports `pyrit`. The attacker is OUR `Target` protocol, not a PyRIT
 `PromptChatTarget` (only pyrit_native.py / pyrit_bridge.py may import pyrit).
@@ -112,8 +113,8 @@ async def ask_attacker(attacker: Target | None, technique_brief: str, objective:
                        fallback: str, history: list[Turn] | None = None) -> str:
     """Ask the attacker LLM to apply `technique_brief` to the objective; else use `fallback`.
 
-    `technique_brief` DESCRIBES the published method (what the paper does). `fallback` is a minimal
-    structural rendering used offline / in tests — it is not an optimised payload.
+    `technique_brief` is a neutral one-line description of the published method plus its citation.
+    `fallback` is the bare objective/canary text, unstyled — no technique phrasing is authored here.
     """
     if attacker is None:
         return fallback

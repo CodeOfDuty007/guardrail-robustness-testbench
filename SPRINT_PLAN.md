@@ -78,8 +78,9 @@ resolved or explicitly waived with a reason.
 
 ## Safety invariants (QA checks these on every story)
 
-1. No tuned adversarial payload library: families describe a published technique and generate at
-   runtime; offline fallbacks are minimal structural templates.
+1. Attack text is generated at runtime by the ATTACKER LLM (user decision). Families ship only citation +
+   OWASP/ATLAS tags + a neutral one-line technique brief. No authored framing/injection templates;
+   with no attacker configured the bare objective or canary is sent unstyled (mock simulates per-family lift).
 2. Default objectives are benign canaries (`CANARY-…`, `SENTINEL-OK-…`, `INJECTION-OK-…`); real-harm
    datasets are BYO, never shipped.
 3. REX forget set is synthetic (invented entities + random tokens); no real bio/chem/cyber/weapons text.
