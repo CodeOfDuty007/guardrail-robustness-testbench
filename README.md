@@ -23,6 +23,7 @@ operator owns or is explicitly permitted to test.
 - [Deployment](#deployment)
 - [Security and Key Handling](#security-and-key-handling)
 - [Ethics and Responsible Use](#ethics-and-responsible-use)
+- [REX (toy-scale reproduction)](#rex-toy-scale-reproduction)
 - [Related Work](#related-work)
 - [License](#license)
 
@@ -334,6 +335,64 @@ producing or distributing harmful content. Several design decisions follow from 
   general-purpose dataset release.
 - Operators must restrict evaluation to models they own or are explicitly authorized to
   test.
+
+## REX (toy-scale reproduction)
+
+`backend/app/defenses/rex/` reproduces the *mechanism* of REX (Relocating into Removable
+EXperts) from Jin et al., "Towards Architectural-Level Safety Control: Relocating Hazardous
+Knowledge into Removable Experts in Mixture-of-Experts Models", arXiv:2610.25791 (Shanghai
+AI Lab, 2026), on a toy Mixture-of-Experts model, as a defense to evaluate with this testbench.
+
+- **Attribution.** The paper is licensed CC BY 4.0. The method descriptions here are
+  paraphrased from it, scaled down and changed as described below. The authors' code at
+  `github.com/AI45Lab/REX` is Apache-2.0. It targets 26-35B MoE models on multi-GPU
+  hardware, so none of it is vendored: the toy implementation is written from scratch. The
+  released checkpoints are not downloaded. See `NOTICE`.
+- **What runs.** A ~1.2M-parameter causal MoE LM (d_model 128, 2 layers, 8 experts, top-2
+  routing; CPU, single process) trains on a synthetic forget set and a copy task. Each forget
+  fact has the form `the access rune for VAULT-<n> is <random token>`, with invented entities
+  and random consonant+digit tokens. The copy task is the toy's "general capability", tested
+  on held-out sequences. The pipeline then runs REX's three steps:
+  1. **Expert expansion.** Add 2 target experts per layer, copied from existing experts, and
+     extend the router rows.
+  2. **Selective gradient masking and routing differentiation.** Each loss's gradient reaches
+     only an allowed parameter set:
+     - The forget LM loss updates the target experts only.
+     - A routing loss, which sends forget tokens to the targets and retain tokens away from
+       them, updates the router only.
+     - The retain loss updates the original experts and shared weights.
+  3. **Excision.** Physically delete the target experts and their router rows.
+- **Run it.** Install the optional extra with `pip install -e ".[rex]"`, then run
+  `python -c "from app.defenses.rex import run_rex_pipeline; print(run_rex_pipeline(0))"`
+  from `backend/`. Saving is opt-in: pass `save_dir=...` to write the state dicts plus
+  JSON config, vocab and metrics. `default_save_dir(seed)` gives
+  `backend/.tmp/rex/seed-<n>/`, which is git-ignored. Load a saved model with
+  `load_model(dir, "full" | "excised")`. Results are deterministic from `seed`.
+- **Measured (seed 0, laptop CPU).**
+  - Default config: about 45 s end to end. The base and full (relocated) models score
+    forget 1.00 and retain 1.00. The excised model scores forget 0.00 and retain 1.00, and
+    is strictly smaller: 1.48M to 1.21M parameters, 10 to 8 experts per layer.
+  - Fast unit-test config: about 9 s, with the same accuracies.
+  - Test thresholds: excised forget accuracy at most 0.2, retain drop at most 0.1.
+
+**Honest limitations.**
+
+- Toy scale is not the paper's result. This demonstrates the *mechanism* and the
+  *evaluation methodology*, not REX's effectiveness on real models.
+- The synthetic canary is not real hazardous knowledge, so the forget and retain numbers
+  are illustrative only.
+- The toy's forget and retain domains share almost no tokens, so the router separates them
+  trivially. Real hazardous and benign text is far more entangled.
+- The *push-out* term is our own toy interpretation of moving knowledge "out of the original
+  experts". It is an unlikelihood loss on the excised view's forget answers, and it updates
+  the original experts only. It is not taken verbatim from the paper.
+  - Without it (`push_out_weight=0`), routing and masking alone lower excised forget
+    accuracy only to about 0.5 (0.47 default config, 0.54 fast config, seed 0). The
+    remaining knowledge stays in the original and shared weights.
+- Robustness of the removal to later fine-tuning, which is the paper's key claim, is **not**
+  tested here.
+- For the real result, see the paper and the authors' released checkpoints. Do not attempt
+  to run those here.
 
 ## Related Work
 

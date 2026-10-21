@@ -1,0 +1,32 @@
+Guardrail Robustness Testbench
+Copyright 2026 the Guardrail Robustness Testbench contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+-------------------------------------------------------------------------------
+REX (toy-scale reproduction) - backend/app/defenses/rex/
+-------------------------------------------------------------------------------
+
+The toy-scale REX defense reimplements, from the paper's method description, the
+three mechanisms (expert expansion, selective gradient masking + routing
+differentiation, and expert excision) introduced in:
+
+  Cheng Jin, Zhongtian Ma, Xiao Wang, Han Qi, Xiaoyu Wen, Xiang Wang, Youbang Sun,
+  Xia Hu, Bowen Zhou, Chaochao Lu, Qiaosheng Zhang.
+  "Towards Architectural-Level Safety Control: Relocating Hazardous Knowledge into
+  Removable Experts in Mixture-of-Experts Models." arXiv:2610.25791 (2026),
+  Shanghai AI Laboratory. https://arxiv.org/abs/2610.25791
+
+  The paper is licensed under Creative Commons Attribution 4.0 International
+  (CC BY 4.0, https://creativecommons.org/licenses/by/4.0/). Descriptions of the
+  method in this repository are paraphrased from it, with changes: the method is
+  scaled down to a ~1M-parameter toy model with a synthetic forget set, and the
+  "push-out" loss term is this repository's own toy interpretation (see README).
+
+License check (Sprint 0): the authors' reference implementation,
+https://github.com/AI45Lab/REX, is licensed under the Apache License 2.0. It targets
+26-35B-parameter MoE models on multi-GPU hardware, so NO code from it is vendored or
+copied here; the toy implementation is written from scratch. The released
+checkpoints (Hugging Face: AI45Research/rex) are not downloaded or redistributed.
+The REX name and the method belong to the paper's authors; this repository makes
+no claim that the toy reproduces the paper's results.
