@@ -39,7 +39,7 @@ export default function Analytics() {
       <Card trim>
         <div className="row" role="search" aria-label="Analytics filters">
           {sel('model', 'Model', o?.models ?? [])}{sel('cipher', 'Cipher', o?.ciphers ?? [])}{sel('strategy', 'Strategy', o?.strategies ?? [])}{sel('defense', 'Defense', o?.defenses ?? [])}
-          <label style={{ margin: 0 }}>Run<select value={f.run_id ?? ''} onChange={(e) => set('run_id', e.target.value)}><option value="">all</option>{(o?.runs ?? []).map((r: any) => <option key={r.run_id} value={r.run_id}>#{r.run_id} {r.name} ({r.n})</option>)}</select></label>
+          <label style={{ margin: 0 }}>Run<select value={f.run_id ?? ''} onChange={(e) => set('run_id', e.target.value)}><option value="">all</option>{(o?.runs ?? []).map((r: any) => <option key={r.run_id} value={r.run_id}>#{r.run_id} {r.name} ({r.n}{r.attacker_refused ? `, ${r.attacker_refused} attacker-refused excluded` : ''})</option>)}</select></label>
           <label style={{ margin: 0 }}>From<input type="date" value={f.date_from ?? ''} min={o?.date_min} max={o?.date_max} onChange={(e) => set('date_from', e.target.value)} /></label>
           <label style={{ margin: 0 }}>To<input type="date" value={f.date_to ?? ''} min={o?.date_min} max={o?.date_max} onChange={(e) => set('date_to', e.target.value)} /></label>
           <Btn variant="ghost" onClick={() => setF({})}>Reset</Btn>
