@@ -510,6 +510,10 @@ async def replay(spec: dict, target: Target, judge=None) -> Score:
         user = spec.get("full_request_sent") or ""
         if not user:
             raise ValueError(f"corpus item for family {name!r} has no stored full_request_sent; cannot replay exactly")
-    res = await asyncio.wait_for(target.send(obj.system_prompt, user), settings.target_timeout_s)
+    token = sim_family.set(None if name in STRATEGY_REGISTRY else name)  # same simulated mock conditions as the run
+    try:
+        res = await asyncio.wait_for(target.send(obj.system_prompt, user), settings.target_timeout_s)
+    finally:
+        sim_family.reset(token)
     return await score_attempt(objective_text=obj.text, response=res.text, canary_regex=obj.canary_regex, judge=judge,
                                judge_model=getattr(judge, "model", "regex-only") if judge else "regex-only")

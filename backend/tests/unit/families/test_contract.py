@@ -63,3 +63,20 @@ async def test_family_replay_sends_exact_stored_request():
     assert spy.sent == [stored]
     with pytest.raises(ValueError, match="full_request_sent"):
         await replay({**spec, "full_request_sent": ""}, spy)
+
+
+async def test_replay_reapplies_simulated_family_conditions(monkeypatch):
+    """A mock success must re-verify as a success: replay sets the same sim_family the run did."""
+    from app.engine import orchestrator
+    from app.engine.targets import mock
+    seen = []
+
+    class Spy:
+        model_name, provider_kind = "spy", "mock"
+        async def send(self, system, user):
+            seen.append(mock.sim_family.get()); return orchestrator.TargetResult("Okay.")
+
+    o = canary_objectives(1337)[1]
+    await orchestrator.replay({"seed": 1337, "objective_id": o.id, "cipher_type": "NONE", "strategy_name": "encoding",
+                               "plaintext_prompt": o.text, "full_request_sent": o.text}, Spy())
+    assert seen == ["encoding"] and mock.sim_family.get() is None
