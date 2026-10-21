@@ -21,6 +21,7 @@ SELECT a.id AS attempt_id, a.run_id, a.iteration, a.objective_id, a.strategy_nam
        COALESCE(a.defense_name, 'none') AS defense, a.status, a.created_at,
        COALESCE(a.family, a.strategy_name) AS family, COALESCE(a.category, 'jailbreak') AS category,
        COALESCE(a.channel, 'direct') AS channel, a.delivery, a.technique, a.generated_by,
+       a.family AS family_raw,
        r.target_model, r.latency_ms, r.cost_usd, r.prompt_tokens, r.completion_tokens,
        p.plaintext_size_bytes, p.ciphertext_size_bytes, p.encryption_time_ms, p.decryption_time_ms,
        p.avalanche_score, p.confusion_chi2, p.diffusion_score, p.shannon_entropy,
@@ -41,7 +42,7 @@ _TYPES = {"attempt_id": "BIGINT", "run_id": "BIGINT", "iteration": "INTEGER", "c
           "filter_evaded": "BOOLEAN", "semantic_complied": "BOOLEAN", "bypass": "BOOLEAN",
           "regex_verdict": "BOOLEAN", "judge_lm_verdict": "BOOLEAN", "llamaguard_verdict": "BOOLEAN"}
 _TEXT = {"objective_id", "strategy_name", "cipher_type", "defense", "status", "target_model", "score_source",
-         "family", "category", "channel", "delivery", "technique", "generated_by",
+         "family", "category", "channel", "delivery", "technique", "generated_by", "family_raw",
          "owasp_tag", "atlas_tag", "dataset_name", "run_name"}
 _BOOLS = ("filter_evaded", "semantic_complied", "bypass", "regex_verdict", "judge_lm_verdict", "llamaguard_verdict")
 # aggregate over columns that can change in place; compared on the SAME id set in source and replica
@@ -158,8 +159,11 @@ def query(sql: str, params: list | None = None) -> list[dict]:
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-def flat_rows(f: Filters, columns: str = "*", extra: str = "") -> list[dict]:
+def flat_rows(f: Filters, columns: str = "*", extra: str = "", cond: str = "") -> list[dict]:
+    """`cond` is an extra SQL predicate ANDed onto the filter set (e.g. "family_raw IS NOT NULL")."""
     w, a = f.where()
+    if cond:
+        w = f"{w} AND ({cond})" if w else f" WHERE ({cond})"
     return query(f"SELECT {columns} FROM flat{w} {extra}", a)
 
 
