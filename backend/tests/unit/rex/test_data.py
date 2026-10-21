@@ -99,3 +99,17 @@ def test_tokenizer_roundtrip_and_deterministic_vocab():
 def test_impossible_copy_space_rejected():
     with pytest.raises(ValueError):
         generate_corpora(0, DataConfig(n_retain_train=60, n_retain_test=10, copy_len=2, n_symbols=8))
+
+
+def test_heldout_prompts_are_new_phrasings_of_the_same_facts():
+    from app.defenses.rex.data import HELDOUT_TEMPLATES, FORGET_TEMPLATE
+    c = generate_corpora(0)
+    assert len(c.forget_heldout) == len(HELDOUT_TEMPLATES) * len(c.forget)
+    assert FORGET_TEMPLATE not in HELDOUT_TEMPLATES
+    train = {ex.prompt for ex in c.forget}
+    facts = {ex.prompt[5]: ex.answer for ex in c.forget}
+    for ex in c.forget_heldout:
+        assert ex.prompt not in train
+        ent = next(w for w in ex.prompt if w.startswith("VAULT-"))
+        assert facts[ent] == ex.answer
+        assert all(w in c.vocab for w in ex.prompt)

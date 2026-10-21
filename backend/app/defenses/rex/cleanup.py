@@ -12,9 +12,10 @@ control RR (paper §4.5, Table 5), whose only difference from A2 is the starting
   attention, embeddings, norms and the LM head stay frozen.
 * Both terms use labelled tokens only, averaged per sequence, squared error averaged over the hidden dim.
 
-Toy adaptations (documented in README): the steering coefficient is expressed in units of the reference
-model's mean hidden-state norm on general data (``c = rmu_steer * norm``) because the paper's absolute
-c=300 is tied to its models' activation scale; the budget is a fixed number of steps, shared by A2 and RR.
+Toy adaptations (documented in README): the steering coefficient is expressed in units of B's mean
+monitor-layer hidden-state norm on general data (``c = rmu_steer * norm(B)``, one value for both A2 and
+RR) because the paper's absolute c=300 is tied to its models' activation scale; the budget is a fixed
+number of steps, shared by A2 and RR.
 """
 from __future__ import annotations
 
@@ -43,8 +44,21 @@ def rmu_trainable(model: ToyMoE, monitor_layer: int) -> list[nn.Parameter]:
     return [p for layer in model.moe_layers()[: monitor_layer + 1] for e in layer.experts for p in e.parameters()]
 
 
-def rmu_cleanup(model: ToyMoE, forget: Batch, retain: Batch, cfg: RexConfig, seed: int) -> ToyMoE:
-    """Return a cleaned copy of ``model``. Deterministic from ``seed`` (direction ``u`` and data order)."""
+@torch.no_grad()
+def reference_hidden_norm(model: ToyMoE, retain: Batch, layer: int) -> float:
+    """Mean L2 norm of ``model``'s monitor-layer hidden states on labelled general tokens."""
+    model.eval()
+    lab = (retain.targets != IGNORE) & retain.real
+    return float(model.hidden(retain.ids, layer)[lab].norm(dim=-1).mean())
+
+
+def rmu_cleanup(model: ToyMoE, forget: Batch, retain: Batch, cfg: RexConfig, seed: int,
+                steer: float) -> ToyMoE:
+    """Return a cleaned copy of ``model``, steering forget states to ``steer * u``.
+
+    ``steer`` is the *absolute* steering coefficient c. The pipeline derives it once from the common
+    reference B (``rmu_steer * reference_hidden_norm(B)``) and passes the same value to A2 and RR.
+    Deterministic from ``seed`` (direction ``u`` and data order)."""
     from app.defenses.rex.relocate import _batches  # local: relocate imports this module
 
     L = cfg.rmu_monitor_layer
@@ -61,10 +75,7 @@ def rmu_cleanup(model: ToyMoE, forget: Batch, retain: Batch, cfg: RexConfig, see
     d = m.cfg.d_model
     u = torch.randn(d, generator=gen)
     u = u / u.norm()
-    r_lab = (retain.targets != IGNORE) & retain.real
-    with torch.no_grad():
-        norm = ref.hidden(retain.ids, L)[r_lab].norm(dim=-1).mean()
-    target = cfg.rmu_steer * norm * u
+    target = steer * u
 
     opt = torch.optim.AdamW(trainable, lr=cfg.rmu_lr, betas=(0.9, 0.999), weight_decay=0.0)
     fb = _batches(len(forget), min(cfg.forget_batch, len(forget)), gen)

@@ -48,7 +48,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from app.defenses.rex.cleanup import rmu_cleanup
+from app.defenses.rex.cleanup import reference_hidden_norm, rmu_cleanup
 from app.defenses.rex.data import Corpora, DataConfig, Tokenizer, generate_corpora
 from app.defenses.rex.evaluate import (
     IGNORE, Batch, accuracy, answer_prob, encode_examples, route_to_experts, seq_len,
@@ -377,7 +377,10 @@ def paper_losses(model: ToyMoE, n_orig: int, f: Batch, r: Batch, cfg: RexConfig
     ce = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1), ignore_index=IGNORE,
                          reduction="none").reshape(ids.shape)
     lab = targets != IGNORE
-    lm_h, lm_s = ce[lab & harm].mean(), ce[lab & ~harm].mean()
+    # one L_LM = mean over *all* labelled tokens of the mixed batch (as on a packed paper batch); its
+    # target-token and general-token parts are split only to route their gradients (sum = L_LM)
+    n_lab = lab.sum().clamp_min(1)
+    lm_h, lm_s = ce[lab & harm].sum() / n_lab, ce[lab & ~harm].sum() / n_lab
     K = cfg.top_k
     z = [_target_gate_mass(x, n_orig, K) for x in raw]
     z_h = torch.stack([zz[route & harm].mean() for zz in z]).mean()
@@ -470,21 +473,28 @@ def rex_pipeline(seed: int, config: RexConfig | None = None, *, base: ToyMoE | N
     cfg = config or default_config()
     prev_threads = torch.get_num_threads()
     prev_det = torch.are_deterministic_algorithms_enabled()
+    prev_warn = torch.is_deterministic_algorithms_warn_only_enabled()
     torch.set_num_threads(cfg.num_threads)
     torch.use_deterministic_algorithms(True)
     try:
+        # CPU only: fork and seed the CPU generator, never accelerator RNGs (torch.manual_seed would)
         with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(seed)
+            torch.default_generator.manual_seed(seed)
             return _run(seed, cfg, base)
     finally:
         torch.set_num_threads(prev_threads)
-        torch.use_deterministic_algorithms(prev_det)
+        torch.use_deterministic_algorithms(prev_det, warn_only=prev_warn)
 
 
-def _stage_metrics(model: ToyMoE, forget: Batch, retain_te: Batch, active: torch.Tensor | None = None
-                   ) -> dict[str, float]:
-    return {"forget_acc": accuracy(model, forget, active), "retain_acc": accuracy(model, retain_te, active),
-            "forget_answer_prob": answer_prob(model, forget, active)}
+def _stage_metrics(model: ToyMoE, forget: Batch, forget_ho: Batch, retain_te: Batch,
+                   active: torch.Tensor | None = None) -> dict[str, float]:
+    """``*_train``: the trained forget prompts. ``*_heldout_prompt``: never-trained phrasings of the same
+    facts (does the association survive, or only the memorised prompt string?)."""
+    return {"forget_acc_train": accuracy(model, forget, active),
+            "forget_acc_heldout_prompt": accuracy(model, forget_ho, active),
+            "retain_acc": accuracy(model, retain_te, active),
+            "forget_answer_prob_train": answer_prob(model, forget, active),
+            "forget_answer_prob_heldout_prompt": answer_prob(model, forget_ho, active)}
 
 
 @torch.no_grad()
@@ -504,6 +514,7 @@ def _run(seed: int, cfg: RexConfig, base: ToyMoE | None) -> RexArtifacts:
     tok = Tokenizer(corpora.vocab)
     T = seq_len(corpora.all_examples())
     forget = encode_examples(tok, corpora.forget, T)
+    forget_ho = encode_examples(tok, corpora.forget_heldout, T)   # evaluation only, never trained on
     retain_tr = encode_examples(tok, corpora.retain_train, T)
     retain_te = encode_examples(tok, corpora.retain_test, T)
     timings["data_s"] = time.perf_counter() - t0
@@ -543,8 +554,11 @@ def _run(seed: int, cfg: RexConfig, base: ToyMoE | None) -> RexArtifacts:
     timings["excise_s"] = time.perf_counter() - t
 
     t = time.perf_counter()
-    delivered = rmu_cleanup(excised, forget, retain_tr, cfg, seed)
-    rmu_only = rmu_cleanup(base, forget, retain_tr, cfg, seed)       # matched control: same seed/budget
+    # one absolute steering magnitude for both, from the common reference B (matched control)
+    ref_norm = reference_hidden_norm(base, retain_tr, cfg.rmu_monitor_layer)
+    steer = cfg.rmu_steer * ref_norm
+    delivered = rmu_cleanup(excised, forget, retain_tr, cfg, seed, steer)
+    rmu_only = rmu_cleanup(base, forget, retain_tr, cfg, seed, steer)  # same seed/budget/c/u
     timings["cleanup_s"] = time.perf_counter() - t
 
     t = time.perf_counter()
@@ -555,9 +569,12 @@ def _run(seed: int, cfg: RexConfig, base: ToyMoE | None) -> RexArtifacts:
         "variant": cfg.variant,
         "provenance": VARIANT_PROVENANCE[cfg.variant],
         "config": cfg.to_dict(),
-        "stages": {k: _stage_metrics(v, forget, retain_te) for k, v in models.items()},
+        "stages": {k: _stage_metrics(v, forget, forget_ho, retain_te) for k, v in models.items()},
         # diagnostic: F0 with targets masked == B with its source experts scaled by s (before relocation)
-        "F0_excised_view": _stage_metrics(expanded, forget, retain_te, active_mask(full.n_experts, targets)),
+        "F0_excised_view": _stage_metrics(expanded, forget, forget_ho, retain_te,
+                                          active_mask(full.n_experts, targets)),
+        "rmu": {"steer_reference": "B", "reference_hidden_norm": round(ref_norm, 6),
+                "steering_coefficient_c": round(steer, 6), "monitor_layer": cfg.rmu_monitor_layer},
         "params": {k: param_count(v) for k, v in models.items()},
         "experts_per_layer": {k: v.n_experts for k, v in models.items()},
         "target_experts": targets,
@@ -566,17 +583,19 @@ def _run(seed: int, cfg: RexConfig, base: ToyMoE | None) -> RexArtifacts:
         "routing": {"forget_mass_on_targets": route_to_experts(full, forget, targets),
                     "retain_mass_on_targets": route_to_experts(full, retain_te, targets),
                     "retain_target_selection_rate": retain_target_selection(full, retain_te, n_orig)},
-        "n_forget": len(corpora.forget), "n_retain_test": len(corpora.retain_test),
+        "n_forget": len(corpora.forget), "n_forget_heldout_prompt": len(corpora.forget_heldout),
+        "n_retain_test": len(corpora.retain_test),
         "excised_sha256": state_sha256(excised),
         "delivered_sha256": state_sha256(delivered),
     }
     st = m["stages"]
     m["summary"] = {
-        "forget_acc": {k: st[k]["forget_acc"] for k in ("B", "F1", "A1", "A2", "RR")},
-        "retain_acc": {k: st[k]["retain_acc"] for k in ("B", "F1", "A1", "A2", "RR")},
-        "forget_answer_prob": {k: st[k]["forget_answer_prob"] for k in ("B", "F1", "A1", "A2", "RR")},
-        "excision_forget_drop": st["F1"]["forget_acc"] - st["A1"]["forget_acc"],    # paper: Delta WMDP
-        "a2_minus_rr_forget": st["A2"]["forget_acc"] - st["RR"]["forget_acc"],      # < 0: REX beats RR
+        **{key: {k: st[k][key] for k in ("B", "F1", "A1", "A2", "RR")}
+           for key in ("forget_acc_train", "forget_acc_heldout_prompt", "retain_acc")},
+        "excision_forget_drop": st["F1"]["forget_acc_train"] - st["A1"]["forget_acc_train"],  # Delta WMDP
+        "a2_minus_rr_forget": st["A2"]["forget_acc_train"] - st["RR"]["forget_acc_train"],    # <0: REX wins
+        "a2_minus_rr_forget_heldout_prompt": (st["A2"]["forget_acc_heldout_prompt"]
+                                              - st["RR"]["forget_acc_heldout_prompt"]),
         "a2_minus_rr_retain": st["A2"]["retain_acc"] - st["RR"]["retain_acc"],
     }
     timings["eval_s"] = time.perf_counter() - t

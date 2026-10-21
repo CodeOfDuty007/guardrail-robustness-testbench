@@ -142,7 +142,7 @@ class ToyMoE(nn.Module):
 def build_model(cfg: MoEConfig, seed: int) -> ToyMoE:
     """Seeded init that does not depend on (or disturb) the global RNG."""
     with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(seed)
+        torch.default_generator.manual_seed(seed)   # CPU generator only
         model = ToyMoE(cfg)
     return model
 

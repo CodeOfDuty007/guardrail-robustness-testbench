@@ -22,6 +22,13 @@ PAD, BOS, EOS, UNK = "<pad>", "<bos>", "<eos>", "<unk>"
 SPECIALS: tuple[str, ...] = (PAD, BOS, EOS, UNK)
 
 FORGET_TEMPLATE: tuple[str, ...] = ("the", "access", "rune", "for", "{entity}", "is")
+# Held-out *evaluation-only* phrasings of the same facts: never trained on (not by B, relocation or RMU).
+# They reuse only the training template's words, so no untrained token embeddings are involved.
+HELDOUT_TEMPLATES: tuple[tuple[str, ...], ...] = (
+    ("access", "rune", "for", "{entity}", "is"),
+    ("the", "rune", "for", "{entity}", "is"),
+    ("for", "{entity}", "the", "access", "rune", "is"),
+)
 COPY_WORD, COPY_SEP = "copy", "="
 ENTITY_RE = re.compile(r"^VAULT-\d+$")
 # lowercase consonants (no vowels -> never an English word) + digits 2-9
@@ -61,9 +68,10 @@ class Corpora:
     retain_train: list[Example]
     retain_test: list[Example]
     vocab: list[str] = field(default_factory=list)
+    forget_heldout: list[Example] = field(default_factory=list)   # eval-only alternate phrasings
 
     def all_examples(self) -> list[Example]:
-        return [*self.forget, *self.retain_train, *self.retain_test]
+        return [*self.forget, *self.forget_heldout, *self.retain_train, *self.retain_test]
 
 
 class Tokenizer:
@@ -105,8 +113,12 @@ def _random_answer(rng: random.Random) -> str:
             return s
 
 
-def forget_prompt(entity: str) -> tuple[str, ...]:
-    return (BOS, *(entity if w == "{entity}" else w for w in FORGET_TEMPLATE))
+def forget_prompt(entity: str, template: tuple[str, ...] = FORGET_TEMPLATE) -> tuple[str, ...]:
+    return (BOS, *(entity if w == "{entity}" else w for w in template))
+
+
+def _entity(ex: Example) -> str:
+    return next(w for w in ex.prompt if ENTITY_RE.match(w))
 
 
 def copy_prompt(symbols: tuple[str, ...]) -> tuple[str, ...]:
@@ -140,7 +152,8 @@ def generate_corpora(seed: int, cfg: DataConfig | None = None) -> Corpora:
             used.add(s); seqs.append(s)
     retain = [Example(copy_prompt(s), s) for s in seqs]
     vocab = build_vocab(forget, symbols)
-    corpora = Corpora(seed, forget, retain[: cfg.n_retain_train], retain[cfg.n_retain_train:], vocab)
+    heldout = [Example(forget_prompt(_entity(ex), t), ex.answer) for t in HELDOUT_TEMPLATES for ex in forget]
+    corpora = Corpora(seed, forget, retain[: cfg.n_retain_train], retain[cfg.n_retain_train:], vocab, heldout)
     verify_synthetic(corpora)
     return corpora
 
@@ -164,6 +177,15 @@ def verify_synthetic(corpora: Corpora) -> None:
             raise ValueError(f"forget entity not invented-pattern: {entity!r}")
         if len(ex.answer) != 1 or not ANSWER_RE.match(ex.answer[0]):
             raise ValueError(f"forget answer not a generator token: {ex.answer!r}")
+    train_prompts = {ex.prompt for ex in corpora.forget}
+    facts = {_entity(ex): ex.answer for ex in corpora.forget}
+    for ex in corpora.forget_heldout:
+        if ex.prompt in train_prompts:
+            raise ValueError("held-out prompt is also a training prompt")
+        if facts.get(_entity(ex)) != ex.answer:
+            raise ValueError("held-out example does not match a forget fact")
+        if any(w not in corpora.vocab for w in ex.prompt[1:]):
+            raise ValueError("held-out prompt uses a word outside the vocabulary")
     for ex in [*corpora.retain_train, *corpora.retain_test]:
         if not all(SYMBOL_RE.match(s) for s in ex.answer):
             raise ValueError(f"retain answer not copy symbols: {ex.answer!r}")

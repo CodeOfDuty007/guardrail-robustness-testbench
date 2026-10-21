@@ -114,8 +114,8 @@ def test_rmu_updates_only_expert_mlps_up_to_monitor_and_is_deterministic(setup):
     base, forget, retain, cfg = setup
     cfg = replace(cfg, rmu_monitor_layer=0)
     snapshot = copy.deepcopy(base.state_dict())
-    a = rmu_cleanup(base, forget, retain, cfg, seed=0)
-    b = rmu_cleanup(base, forget, retain, cfg, seed=0)
+    a = rmu_cleanup(base, forget, retain, cfg, seed=0, steer=10.0)
+    b = rmu_cleanup(base, forget, retain, cfg, seed=0, steer=10.0)
     assert all(torch.equal(x, y) for x, y in zip(a.state_dict().values(), b.state_dict().values()))
     assert all(torch.equal(v, snapshot[k]) for k, v in base.state_dict().items())   # input not mutated
     train = {n for n, p in a.named_parameters() if any(p is q for q in rmu_trainable(a, 0))}
@@ -124,3 +124,15 @@ def test_rmu_updates_only_expert_mlps_up_to_monitor_and_is_deterministic(setup):
     frozen_same = [torch.equal(p, ref[n]) for n, p in a.named_parameters() if n not in train]
     assert frozen_same and all(frozen_same)                     # routers, attention, layer-1 experts, ...
     assert any(not torch.equal(p, ref[n]) for n, p in a.named_parameters() if n in train)
+
+
+def test_paper_lm_loss_is_one_token_mean_split_by_domain(setup):
+    base, forget, retain, cfg = setup
+    f0 = _expanded(base).eval()
+    zero = replace(cfg, mass_floor_weight=0.0, mass_ceiling_weight=0.0, rank_weight=0.0)
+    loss_h, loss_s, _ = R.paper_losses(f0, N, forget, retain, zero)
+    ids, targets, _, _, active = R.mixed_batch(forget, retain, f0.n_experts, N)
+    logits, _ = f0(ids, active=active)
+    combined = torch.nn.functional.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1),
+                                                 ignore_index=-100)
+    assert float((loss_h + loss_s).detach()) == pytest.approx(float(combined.detach()), rel=1e-5)

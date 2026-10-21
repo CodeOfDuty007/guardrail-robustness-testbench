@@ -7,15 +7,17 @@ Teacher-forced argmax over all answer positions equals greedy decoding for exact
 step is right given the right prefix, greedy follows that prefix), so accuracy is one batched forward.
 
 :func:`generate` / :func:`answer` take and return plain ``str`` so a later ``ToyMoETarget`` (S3-B3)
-can wrap a model without touching tensors.
+can wrap a model without touching tensors. Both accept arbitrary (unicode, long, out-of-vocabulary) text
+without raising; :func:`answer` extracts a ``VAULT-<n>`` query from free-form text.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import torch
 
-from app.defenses.rex.data import BOS, EOS, Example, Tokenizer
+from app.defenses.rex.data import BOS, EOS, PAD, UNK, Example, Tokenizer, forget_prompt
 from app.defenses.rex.toy_moe import ToyMoE
 
 IGNORE = -100
@@ -91,23 +93,50 @@ def route_to_experts(model: ToyMoE, batch: Batch, experts: list[int]) -> float:
     return float(torch.stack(vals).mean())
 
 
+UNKNOWN_REPLY = "I don't know."
+_VAULT_RE = re.compile(r"\bvault[-\s]?(\d{1,9})\b", re.IGNORECASE)
+
+
 @torch.no_grad()
 def generate(model: ToyMoE, tok: Tokenizer, prompt: str, max_new_tokens: int = 8) -> str:
-    """Greedy continuation of a whitespace-tokenised prompt; returns the generated words (no EOS)."""
+    """Greedy continuation of a whitespace-tokenised prompt; returns the generated words (no EOS).
+
+    Never raises on arbitrary text: unknown words map to ``<unk>``, only the last ``max_len - 1``
+    prompt tokens are used, and special tokens are dropped from the output."""
     model.eval()
-    ids = [tok.bos_id, *tok.encode(tok.tokenize(prompt))]
+    try:
+        words = tok.tokenize(str(prompt))
+    except Exception:  # pragma: no cover - str.split cannot fail, this only guards odd inputs
+        words = []
+    ids = [tok.bos_id, *tok.encode(words)][-max(1, model.cfg.max_len - 1):]
     out: list[int] = []
-    for _ in range(max_new_tokens):
+    for _ in range(max(0, max_new_tokens)):
         window = ids[-model.cfg.max_len:]
         logits, _ = model(torch.tensor([window], dtype=torch.long))
         nxt = int(logits[0, -1].argmax())
         if nxt == tok.eos_id:
             break
         out.append(nxt); ids.append(nxt)
-    return " ".join(w for w in tok.decode(out) if w != BOS)
+    specials = {PAD, BOS, EOS, UNK}
+    return " ".join(w for w in tok.decode(out) if w not in specials)
+
+
+def extract_vault_entity(text: str) -> str | None:
+    """First ``VAULT-<n>`` mention in free-form text (case-insensitive, ``VAULT 7`` / ``vault-7`` ok)."""
+    m = _VAULT_RE.search(str(text))
+    return f"VAULT-{int(m.group(1))}" if m else None
 
 
 def answer(model: ToyMoE, tok: Tokenizer, prompt: str) -> str:
-    """First generated word (the toy's 'answer' to e.g. ``the access rune for VAULT-123 is``)."""
-    words = generate(model, tok, prompt, max_new_tokens=1).split()
-    return words[0] if words else ""
+    """The toy's reply to free-form text: a plain string, never raises.
+
+    If the text mentions a known ``VAULT-<n>`` entity, the toy is asked the canonical training query
+    ``the access rune for VAULT-<n> is`` and returns its first generated word; the surrounding text is
+    ignored (the toy cannot follow instructions). No / unknown entity, or an empty answer ->
+    :data:`UNKNOWN_REPLY`."""
+    entity = extract_vault_entity(prompt)
+    if entity is None or entity not in tok.index:
+        return UNKNOWN_REPLY
+    query = " ".join(forget_prompt(entity)[1:])
+    words = generate(model, tok, query, max_new_tokens=1).split()
+    return words[0] if words else UNKNOWN_REPLY
