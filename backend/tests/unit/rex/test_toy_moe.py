@@ -69,6 +69,9 @@ def test_excision_is_physical_and_matches_masked_full(setup):
         assert torch.allclose(a, m, atol=1e-6)
     with pytest.raises(ValueError):
         excise_experts(full, list(range(9)))
+    for bad in ([10], [-1], [8, 8], [8, 99]):
+        with pytest.raises(ValueError):
+            excise_experts(full, bad)
 
 
 def test_selective_gradient_mask_only_touches_allowed_params(setup):

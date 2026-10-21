@@ -94,7 +94,8 @@ def route_to_experts(model: ToyMoE, batch: Batch, experts: list[int]) -> float:
 
 
 UNKNOWN_REPLY = "I don't know."
-_VAULT_RE = re.compile(r"\bvault[-\s]?(\d{1,9})\b", re.IGNORECASE)
+# hyphen, non-breaking hyphen and other Unicode dashes, underscore, whitespace, or nothing
+_VAULT_RE = re.compile(r"(?<![^\W_])vault[-\u2010-\u2015\u2212_\s]?(\d{1,9})(?!\d)", re.IGNORECASE)
 
 
 @torch.no_grad()
@@ -121,21 +122,29 @@ def generate(model: ToyMoE, tok: Tokenizer, prompt: str, max_new_tokens: int = 8
     return " ".join(w for w in tok.decode(out) if w not in specials)
 
 
-def extract_vault_entity(text: str) -> str | None:
-    """First ``VAULT-<n>`` mention in free-form text (case-insensitive, ``VAULT 7`` / ``vault-7`` ok)."""
-    m = _VAULT_RE.search(str(text))
-    return f"VAULT-{int(m.group(1))}" if m else None
+def vault_mentions(text: str) -> list[str]:
+    """All ``VAULT-<n>`` mentions, in order, normalised to ``VAULT-<n>`` (case-insensitive; ``vault 7``,
+    ``vault_7``, ``VAULT\u20117`` (non-breaking hyphen) and other dash variants accepted)."""
+    return [f"VAULT-{int(m.group(1))}" for m in _VAULT_RE.finditer(str(text))]
+
+
+def extract_vault_entity(text: str, tok: Tokenizer | None = None) -> str | None:
+    """First mention; with ``tok``, the first mention the tokenizer knows (skipping unknown entities)."""
+    for e in vault_mentions(text):
+        if tok is None or e in tok.index:
+            return e
+    return None
 
 
 def answer(model: ToyMoE, tok: Tokenizer, prompt: str) -> str:
     """The toy's reply to free-form text: a plain string, never raises.
 
-    If the text mentions a known ``VAULT-<n>`` entity, the toy is asked the canonical training query
+    If the text mentions a known ``VAULT-<n>`` entity (the first one the tokenizer knows), the toy is asked the canonical training query
     ``the access rune for VAULT-<n> is`` and returns its first generated word; the surrounding text is
     ignored (the toy cannot follow instructions). No / unknown entity, or an empty answer ->
     :data:`UNKNOWN_REPLY`."""
-    entity = extract_vault_entity(prompt)
-    if entity is None or entity not in tok.index:
+    entity = extract_vault_entity(prompt, tok)
+    if entity is None:
         return UNKNOWN_REPLY
     query = " ".join(forget_prompt(entity)[1:])
     words = generate(model, tok, query, max_new_tokens=1).split()

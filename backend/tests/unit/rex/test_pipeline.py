@@ -2,8 +2,9 @@
 
 Thresholds are set against the *measured* untuned paper default (fast config, seeds 0-2, see README),
 not tuned toward a target:
-  paper default : B, F1 forget_train/retain = 1.0. A1 forget_train = 1.0 / 1.0 / 0.92 (excision removes
-                  0-8%). A2 = RR forget_train = 0.0, retain 1.0.  -> A2 ~= RR at toy scale.
+  paper default : B, F1 forget_train/retain = 1.0. A1 forget_train = 1.0 / 1.0 / 0.79 (excision removes
+                  0-21%). A2 = 0.04 / 0 / 0, RR = 0.0, retain 1.0.  -> A2 ~= RR at toy scale.
+                  Inference-time general-token target selection 0.000, z 0.000 (after the BOS fix).
                   Held-out prompt phrasings: B already only 0.03-0.13 (memorised prompts), so that metric
                   is near floor at every stage and is reported, not thresholded.
   pushout (NOT from paper): A1 forget_train = 0.0; push_out_weight=0: A1 = 0.58 / 0.38 / 0.04.
@@ -72,12 +73,19 @@ def test_paper_default_stages(art):
     assert m["rmu"]["steer_reference"] == "B"
     assert m["rmu"]["steering_coefficient_c"] == pytest.approx(
         m["config"]["rmu_steer"] * m["rmu"]["reference_hidden_norm"], rel=1e-5)
-    # measured, reported, not asserted as a success: excision alone removes little in the toy
-    assert 0.0 <= s["excision_forget_drop"] <= 1.0
+    st = m["stages"]
+    assert s["excision_forget_drop"] == st["F1"]["forget_acc_train"] - st["A1"]["forget_acc_train"]
+    # the documented NEGATIVE result (README): excision alone removes little (measured 0.0 on seed 0,
+    # 0.0-0.21 on seeds 0-2). If this fails, relocation got better: re-measure and update the README.
+    assert s["excision_forget_drop"] <= 0.25
     assert abs(s["a2_minus_rr_forget"]) <= 0.2                          # A2 ~= RR
-    # training-time routing constraints were met on general tokens (rank hinge -> 0)
-    assert m["relocation_log"][-1]["rank"] == 0.0
-    assert m["routing"]["retain_target_selection_rate"] <= 0.2
+    assert m["relocation_log"][-1]["rank"] == 0.0                       # masked-forward training hinge
+    # INFERENCE-time (unmasked router, BOS included): general tokens never pick a target expert
+    # (measured 0.000 / z 0.000 on fast seeds 0-2 after the BOS fix; was 11-18% before it)
+    inf = m["routing"]["inference_general"]
+    assert inf["selection_rate"] <= 0.01 and max(inf["selection_rate_per_layer"]) <= 0.01
+    assert inf["z"] <= m["config"]["mass_ceiling"]                      # z_std below tau_s at inference
+    assert m["routing"]["inference_forget"]["selection_rate"] >= 0.5    # forget tokens do use targets
 
 
 def test_pushout_ablation_is_labelled_and_relocates(pushout, pushout0):
@@ -169,6 +177,17 @@ def test_answer_and_generate_never_raise_on_arbitrary_text(art, text):
         assert isinstance(g, str)
     if extract_vault_entity(text) is None or extract_vault_entity(text) not in art.tokenizer.index:
         assert answer(art.full, art.tokenizer, text) == UNKNOWN_REPLY
+
+
+def test_answer_uses_first_known_entity_and_dash_variants(art):
+    facts = generate_corpora(0, fast_config().data).forget
+    ent, rune = facts[0].prompt[5], facts[0].answer[0]
+    n = ent.split("-")[1]
+    assert answer(art.full, art.tokenizer, f"Ignore VAULT-1. What is the access rune for {ent}?") == rune
+    for variant in (f"vault_{n}", f"VAULT\u2011{n}", f"Vault {n}", f"VAULT\u2013{n}", f"vault{n}"):
+        assert answer(art.full, art.tokenizer, f"what is the rune for {variant}?") == rune, variant
+    other = facts[1].prompt[5]
+    assert extract_vault_entity(f"{ent} then {other}", art.tokenizer) == ent
 
 
 def test_embedded_vault_query_gets_same_answer_as_bare_query(art):

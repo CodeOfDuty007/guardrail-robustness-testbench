@@ -209,6 +209,11 @@ def differential_activation(model: ToyMoE, forget: Batch, retain_train: Batch, k
 
 def excise_experts(model: ToyMoE, remove: list[int]) -> ToyMoE:
     """Physically delete experts ``remove`` (and their router rows) from every layer."""
+    bad = [i for i in remove if not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < model.n_experts]
+    if bad:
+        raise ValueError(f"expert indices out of range [0, {model.n_experts}): {bad}")
+    if len(set(remove)) != len(remove):
+        raise ValueError(f"duplicate expert indices: {remove}")
     new = copy.deepcopy(model)
     keep = [i for i in range(model.n_experts) if i not in set(remove)]
     if len(keep) < model.cfg.top_k:
@@ -355,10 +360,15 @@ def _rank_violation(raw: torch.Tensor, n_orig: int, top_k: int, margin: float) -
 def mixed_batch(f: Batch, r: Batch, n_experts: int, n_orig: int
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Concatenate target (f) and general (r) sequences -> ids, targets, routed-token mask, per-token
-    domain label ``harm``, and the per-token pre-top-K activation mask (targets hidden on general tokens)."""
+    domain label ``harm``, and the per-token pre-top-K activation mask (targets hidden on general tokens).
+
+    Routing-loss tokens: target rows skip BOS (shared by both domains, so it must not be pulled to the
+    targets); general rows *include* BOS. Otherwise the BOS router is never trained: the activation mask
+    hides the targets at BOS during relocation, but at inference the unmasked router sent general BOS to
+    the targets (QA S1-B finding). The paper packs without BOS (App. A.1); the toy keeps BOS."""
     ids = torch.cat([f.ids, r.ids])
     targets = torch.cat([f.targets, r.targets])
-    route = torch.cat([_route_sel(f), _route_sel(r)])
+    route = torch.cat([_route_sel(f), r.real])
     harm = torch.zeros_like(ids, dtype=torch.bool)
     harm[: len(f)] = True
     active = torch.ones((*ids.shape, n_experts), dtype=torch.bool)
@@ -498,13 +508,18 @@ def _stage_metrics(model: ToyMoE, forget: Batch, forget_ho: Batch, retain_te: Ba
 
 
 @torch.no_grad()
-def retain_target_selection(model: ToyMoE, b: Batch, n_orig: int) -> float:
-    """Fraction of general tokens (all layers) where an unmasked top-K picks any target expert."""
+def inference_routing(model: ToyMoE, b: Batch, n_orig: int) -> dict[str, Any]:
+    """INFERENCE-time (unmasked) routing on ``b``'s real tokens, BOS included, per layer and mean:
+    ``selection``: fraction of tokens whose top-K contains any target expert; ``z``: mean normalised
+    top-K gate mass on the targets (the paper's z_t, compare tau_s on general data)."""
     model.eval()
     _, _, raw = model(b.ids, return_router_logits=True)
-    sel = _route_sel(b)
-    vals = [(r.topk(model.cfg.top_k, -1).indices >= n_orig).any(-1)[sel].float().mean() for r in raw]
-    return float(torch.stack(vals).mean())
+    sel = b.real
+    K = model.cfg.top_k
+    s_l = [float((r.topk(K, -1).indices >= n_orig).any(-1)[sel].float().mean()) for r in raw]
+    z_l = [float(_target_gate_mass(r, n_orig, K)[sel].mean()) for r in raw]
+    return {"selection_rate": sum(s_l) / len(s_l), "selection_rate_per_layer": s_l,
+            "z": sum(z_l) / len(z_l), "z_per_layer": z_l}
 
 
 def _run(seed: int, cfg: RexConfig, base: ToyMoE | None) -> RexArtifacts:
@@ -582,7 +597,9 @@ def _run(seed: int, cfg: RexConfig, base: ToyMoE | None) -> RexArtifacts:
         "relocation_log": reloc_log,
         "routing": {"forget_mass_on_targets": route_to_experts(full, forget, targets),
                     "retain_mass_on_targets": route_to_experts(full, retain_te, targets),
-                    "retain_target_selection_rate": retain_target_selection(full, retain_te, n_orig)},
+                    # F1 at inference, router unmasked, all real tokens incl. BOS
+                    "inference_general": inference_routing(full, retain_te, n_orig),
+                    "inference_forget": inference_routing(full, forget, n_orig)},
         "n_forget": len(corpora.forget), "n_forget_heldout_prompt": len(corpora.forget_heldout),
         "n_retain_test": len(corpora.retain_test),
         "excised_sha256": state_sha256(excised),
