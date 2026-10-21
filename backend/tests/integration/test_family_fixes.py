@@ -153,6 +153,10 @@ async def test_attacker_refusal_skips_target_and_is_excluded_from_rates(env, mon
     assert {r["family"] for r in flat_rows(Filters(run_id=rid))} == {"encoding"}
     ov = overview(Filters(run_id=rid))
     assert ov["total_attempts"] == 3 and ov["attacker_refused"] == 3
+    from app.api.analytics import filter_options, report
+    run = next(r for r in filter_options()["runs"] if r["run_id"] == rid)
+    assert run["n"] == 3 and run["attacker_refused"] == 3  # run picker counts match the rates
+    assert "Attacker refused (excluded)" in report("html", Filters(run_id=rid)).body.decode()
 
 
 async def test_refusals_are_never_scored_as_target_responses(env, monkeypatch):
