@@ -493,18 +493,23 @@ async def replay(spec: dict, target: Target, judge=None) -> Score:
         raise ValueError(f"objective {spec['objective_id']} not available for replay")
     if obj.canary_regex is None and judge is None:
         raise ValueError("BYO-dataset objectives need a judge (pass judge_provider_id) to re-verify")
-    cipher = get_cipher(spec["cipher_type"], spec["seed"])
-    ct = cipher.encode(spec["plaintext_prompt"])
-    instr = cipher.decode_instruction()
     name = spec["strategy_name"]
-    if name in STRATEGY_REGISTRY:
+    if name in STRATEGY_REGISTRY:  # legacy strategies: rebuild from plaintext + cipher + static prefix
+        cipher = get_cipher(spec["cipher_type"], spec["seed"])
+        ct = cipher.encode(spec["plaintext_prompt"])
+        instr = cipher.decode_instruction()
         prefix = STRATEGY_REGISTRY[name].prefix
-    elif get_family(name).kind == "single":  # family rows: plaintext already holds the generated framing
-        prefix = ""
+        marker = f"[CIPHER={cipher.name};SEED={cipher.seed}] {ct}" if cipher.name != "NONE" else spec["plaintext_prompt"]
+        user = f"{prefix}{instr}\n{marker}" if instr else f"{prefix}{marker}"
     else:
-        raise ValueError(f"replay of meta-family {name!r} attempts is not supported (multi-turn)")
-    marker = f"[CIPHER={cipher.name};SEED={cipher.seed}] {ct}" if cipher.name != "NONE" else spec["plaintext_prompt"]
-    user = f"{prefix}{instr}\n{marker}" if instr else f"{prefix}{marker}"
+        # Attack families: the attacker LLM generated the request, so it cannot be rebuilt from plaintext.
+        # Resend the exact stored request; refuse anything that is not a single direct user turn.
+        fam = get_family(name)
+        if fam.kind != "single" or getattr(fam, "channel", "direct") != "direct":
+            raise ValueError(f"replay of {name!r} attempts is not supported (multi-turn or indirect)")
+        user = spec.get("full_request_sent") or ""
+        if not user:
+            raise ValueError(f"corpus item for family {name!r} has no stored full_request_sent; cannot replay exactly")
     res = await asyncio.wait_for(target.send(obj.system_prompt, user), settings.target_timeout_s)
     return await score_attempt(objective_text=obj.text, response=res.text, canary_regex=obj.canary_regex, judge=judge,
                                judge_model=getattr(judge, "model", "regex-only") if judge else "regex-only")

@@ -72,6 +72,7 @@ async def verify(cs: Session, item: SuccessfulAttack, judge=None) -> SuccessfulA
             raise ValueError(f"provider now serves {target.model_name!r}, item is for {item.target_model!r}")
     spec = {"seed": item.seed, "cipher_type": item.cipher_type, "strategy_name": item.strategy_name,
             "objective_id": item.objective_id, "plaintext_prompt": item.plaintext_prompt,
+            "full_request_sent": item.full_request_sent,
             "dataset": item.repro_config_json.get("dataset", "canary")}
     item_id = item.id
     cs.commit()  # end the read transaction: never hold a corpus connection across a model call
