@@ -35,7 +35,8 @@ def reset_engine() -> None:
 
 # Columns added after the first public release. `create_all` never ALTERs an existing table, so an
 # existing telemetry.db gets them via an idempotent ADD COLUMN (SQLite has no IF NOT EXISTS for columns).
-_ADDED_COLUMNS = {"attempts": {"family": "VARCHAR", "category": "VARCHAR", "channel": "VARCHAR", "delivery": "VARCHAR"}}
+_ADDED_COLUMNS = {"attempts": {"family": "VARCHAR", "category": "VARCHAR", "channel": "VARCHAR", "delivery": "VARCHAR",
+                              "technique": "VARCHAR", "generated_by": "VARCHAR"}}
 
 
 def _migrate(engine) -> None:

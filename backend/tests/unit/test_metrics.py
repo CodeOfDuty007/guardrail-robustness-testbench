@@ -1,4 +1,5 @@
 import os
+import random
 
 from app.engine.converters.ciphers import get_cipher
 from app.metrics.capture import MetricCapture, avalanche, chi2_uniform, diffusion, shannon_entropy
@@ -11,7 +12,7 @@ def test_entropy_edges():
 
 
 def test_chi2_uniform_random_near_255():
-    assert 180 < chi2_uniform(os.urandom(300_000)) < 340
+    assert 180 < chi2_uniform(random.Random(0).randbytes(300_000)) < 340  # seeded: urandom made this flaky (~1e-4)
     assert chi2_uniform(b"\x00" * 10_000) > 1_000_000
 
 
