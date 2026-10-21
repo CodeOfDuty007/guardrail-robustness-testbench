@@ -1,72 +1,118 @@
-"""REX at toy scale: expert expansion, selective gradient masking + routing differentiation, excision.
+"""REX at toy scale: expansion, relocation, excision, residual cleanup (+ the matched RMU-only control).
 
-Reimplementation (not vendored) of the three mechanisms described in
+Reimplementation (not vendored) of
   Jin et al., "Towards Architectural-Level Safety Control: Relocating Hazardous Knowledge into
   Removable Experts in Mixture-of-Experts Models", arXiv:2610.25791 (Shanghai AI Lab), CC BY 4.0.
   Reference code: github.com/AI45Lab/REX (Apache-2.0; targets 26-35B MoE, so not vendored).
 
-Pipeline (:func:`run_rex_pipeline`):
-1. **base**: train the toy MoE on forget + retain data; it learns both (the "pretrained" model).
-2. **expand** (:func:`expand_experts`): add ``k`` target experts per layer, each a copy of an
-   existing expert; router rows are extended with copies (+ tiny seeded noise to break ties).
-3. **relocate** (:func:`relocate`): each step combines four losses, each routed by an explicit
-   gradient mask (``torch.autograd.grad`` restricted to an allowed parameter set):
-   * forget LM loss on the full model            -> **target experts only**
-   * routing loss (forget tokens -> targets, retain tokens -> originals) -> **router only**
-   * retain LM loss on full + excised view       -> original experts + shared (attention/embeddings)
-   * push-out loss on forget data, excised view (targets masked): pushes the original path's
-     prediction of the forget answer toward uniform  -> **original experts only**. This is our toy
-     reading of "relocates hazardous knowledge *out of* the original experts"; it can be disabled
-     (``push_out_weight=0``) and the pipeline reports that ablation honestly.
-4. **excise** (:func:`excise_experts`): physically delete target experts and their router rows ->
-   a strictly smaller model, numerically identical to the full model with targets masked.
+``variant="paper"`` (default) follows the paper's recipe (§3.2-3.5, App. A.1-A.2, Tables 6-7, the
+Intern-S2/Bio column for setting-specific values):
+
+1. **B**: a *prelearned* base: the toy MoE is trained on forget + retain data, so the hazardous
+   knowledge is already spread over its original experts (the paper starts from a pretrained model).
+2. **F0 = expand(B)** (§3.2): per layer, count top-K selection frequency of each expert on the forget
+   and the general *training* data, take the M experts with the largest ``f_harm - f_std`` as the source
+   set S (differential-activation expansion), clone each (expert + router row, 1e-5 Gaussian noise) as a
+   target expert, then scale the source experts' output by ``s = 0.5``.
+3. **F1 = relocate(F0)** (§3.3-3.4): shared params (attention, embeddings, norms, LM head) are frozen.
+   Per-token gradient masking: the loss on target tokens updates target experts + routers; the loss on
+   general tokens updates original experts + routers. General tokens are dispatched with the pre-top-K
+   activation mask (target logits -> -inf). Objective ``L_LM + L_mass + lambda_r * L_rank`` (eq. 5-7),
+   with the mass/rank losses on the pre-mask router logits. AdamW (0.9, 0.999), wd 0, clip 1, no warmup,
+   cosine to 0, per-bank learning-rate multipliers.
+4. **A1 = excise(F1)** (§3.5): physically delete the target experts and their router rows.
+5. **A2 = RMU(A1)** residual cleanup (§3.5, eq. 8; ``cleanup.py``).
+6. **RR = RMU(B)**: the paper's matched control (§4.5): same RMU operator, hyperparameters, budget and
+   seed applied to B. ``A2 vs RR`` is what relocation + excision add over cleanup alone.
+
+``variant="prelearned_pushout"`` is an **ablation that is NOT from the paper**: our earlier toy recipe
+(clone experts 0..k-1, train shared params, a -log router-mass routing loss, and an unlikelihood
+"push-out" loss on the excised view that drives the original path away from the forget answer).
+``push_out_weight=0`` is its sub-ablation. Stages 4-6 are identical for both variants.
+
+Post-training (paper §3.6, F2/F3/A3) is not reproduced.
 """
 from __future__ import annotations
 
 import copy
 import hashlib
 import json
+import math
 import time
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from app.defenses.rex.cleanup import rmu_cleanup
 from app.defenses.rex.data import Corpora, DataConfig, Tokenizer, generate_corpora
 from app.defenses.rex.evaluate import (
     IGNORE, Batch, accuracy, answer_prob, encode_examples, route_to_experts, seq_len,
 )
-from app.defenses.rex.toy_moe import MoEConfig, ToyMoE, build_model, param_count
+from app.defenses.rex.toy_moe import Expert, MoEConfig, ToyMoE, build_model, param_count
 
 PAPER = ("Jin et al., Towards Architectural-Level Safety Control: Relocating Hazardous Knowledge into "
          "Removable Experts in Mixture-of-Experts Models, arXiv:2610.25791 (CC BY 4.0)")
 DEFAULT_TMP = Path(__file__).resolve().parents[3] / ".tmp" / "rex"   # backend/.tmp (git-ignored)
 
 
+VARIANTS = ("paper", "prelearned_pushout")
+VARIANT_PROVENANCE = {
+    "paper": "paper recipe (arXiv:2610.25791 §3.2-3.5), toy-scaled",
+    "prelearned_pushout": "ablation NOT from the paper (toy push-out recipe)",
+}
+
+
 @dataclass(frozen=True)
 class RexConfig:
     data: DataConfig = field(default_factory=DataConfig)
+    variant: str = "paper"
     d_model: int = 128
     n_layers: int = 2
     n_heads: int = 4
     d_ff: int = 256
     n_experts: int = 8
     top_k: int = 2
-    k_target: int = 2
+    k_target: int = 2                 # M target experts per layer (paper: 8 of 128-256)
     base_steps: int = 600
     relocate_steps: int = 400
     forget_batch: int = 32
     retain_batch: int = 64
     base_lr: float = 3e-3
-    relocate_lr: float = 2e-3
     balance_weight: float = 0.01
+    grad_clip: float = 1.0
+    # --- paper relocation (Table 6 + Table 7 Intern-S2/Bio; learning rates x100 for the toy scale)
+    source_scale: float = 0.5         # s
+    clone_noise: float = 1e-5
+    paper_lr: float = 1e-4            # paper 1e-6
+    orig_expert_mult: float = 1.0     # expert multipliers original / target = 1 / 40
+    target_expert_mult: float = 40.0
+    router_mult: float = 40.0         # paper 40 (original rows) / 60 (target rows); toy router is one matrix
+    mass_floor: float = 0.75          # tau_h (weight lambda_h)
+    mass_floor_weight: float = 6.0
+    mass_ceiling: float = 0.02        # tau_s (weight lambda_s)
+    mass_ceiling_weight: float = 1.0
+    rank_margin: float = 0.1          # delta (weight lambda_r)
+    rank_weight: float = 30.0
+    # --- RMU residual cleanup, shared by A2 and RR (Table 7 Intern-S2/Bio; see cleanup.py)
+    rmu_monitor_layer: int = 0        # "early" monitor layer; updates expert MLPs of layers 0..monitor
+    rmu_steer: float = 4.0            # c, in units of the reference mean hidden norm (paper c=300 absolute)
+    rmu_alpha: float = 350.0
+    rmu_lr: float = 1e-3              # paper 1e-5, constant
+    rmu_steps: int = 100
+    # --- prelearned_pushout ablation (NOT from the paper)
+    pushout_lr: float = 2e-3
     routing_weight: float = 1.0
     push_out_weight: float = 1.0
     num_threads: int = 1
+
+    def __post_init__(self) -> None:
+        if self.variant not in VARIANTS:
+            raise ValueError(f"variant must be one of {VARIANTS}, got {self.variant!r}")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -86,18 +132,79 @@ def default_config() -> RexConfig:
 
 # ---------------------------------------------------------------- architecture surgery
 
-def expand_experts(model: ToyMoE, k: int, gen: torch.Generator) -> ToyMoE:
-    """Return a copy with ``k`` target experts appended per layer (copies of existing experts)."""
+def expand_experts(model: ToyMoE, k: int, gen: torch.Generator, *,
+                   sources: list[list[int]] | None = None, scale: float = 1.0,
+                   noise: float = 1e-3, expert_noise: bool = False) -> ToyMoE:
+    """Return a copy with ``k`` target experts appended per layer, cloned from source experts.
+
+    ``sources[l]``: the k source experts of layer l (default: experts 0..k-1). Each clone copies the
+    expert and its router row; ``noise`` is added to the cloned router rows (and to the cloned expert
+    weights if ``expert_noise``). Afterwards the *source* experts' outputs are scaled by ``scale``
+    (paper §3.2: weakens the hazardous knowledge they hold while keeping most general computation).
+    """
     new = copy.deepcopy(model)
     n = model.n_experts
-    for layer in new.moe_layers():
-        for j in range(k):
-            layer.experts.append(copy.deepcopy(layer.experts[j % n]))
-        rows = layer.router.data[[j % n for j in range(k)]].clone()
-        rows += 1e-3 * torch.randn(rows.shape, generator=gen)
+    for li, layer in enumerate(new.moe_layers()):
+        src = sources[li] if sources is not None else [j % n for j in range(k)]
+        if len(src) != k:
+            raise ValueError(f"layer {li}: need {k} sources, got {len(src)}")
+        for j in src:
+            clone = copy.deepcopy(layer.experts[j])
+            if expert_noise and noise > 0:
+                with torch.no_grad():
+                    for p in clone.parameters():
+                        p.add_(noise * torch.randn(p.shape, generator=gen))
+            layer.experts.append(clone)
+        rows = layer.router.data[src].clone()
+        rows += noise * torch.randn(rows.shape, generator=gen)
         layer.router = nn.Parameter(torch.cat([layer.router.data, rows], 0))
+        if scale != 1.0:
+            with torch.no_grad():
+                for j in set(src):
+                    fc2 = cast(Expert, layer.experts[j]).fc2
+                    fc2.weight.mul_(scale)
+                    fc2.bias.mul_(scale)
     new.cfg = replace(model.cfg, n_experts=n + k)
     return new
+
+
+def _route_sel(b: Batch) -> torch.Tensor:
+    """Tokens the routing statistics/losses use: real input tokens except BOS (shared by both domains)."""
+    sel = b.real.clone()
+    sel[:, 0] = False
+    return sel
+
+
+@torch.no_grad()
+def selection_frequency(model: ToyMoE, b: Batch, chunk: int = 512) -> list[torch.Tensor]:
+    """Per layer: fraction of routed tokens for which each expert is in the top-K."""
+    model.eval()
+    E, K = model.n_experts, model.cfg.top_k
+    counts = [torch.zeros(E) for _ in model.moe_layers()]
+    n_tok = 0
+    for s in range(0, len(b), chunk):
+        sub = b.take(torch.arange(s, min(s + chunk, len(b))))
+        _, _, raw = model(sub.ids, return_router_logits=True)
+        sel = _route_sel(sub)
+        n_tok += int(sel.sum())
+        for li, r in enumerate(raw):
+            idx = r[sel].topk(K, -1).indices.reshape(-1)
+            counts[li] += torch.bincount(idx, minlength=E).float()
+    return [c / max(1, n_tok) for c in counts]
+
+
+def differential_activation(model: ToyMoE, forget: Batch, retain_train: Batch, k: int
+                            ) -> tuple[list[list[int]], list[list[float]]]:
+    """Paper §3.2: per layer, the k experts with the largest ``f_harm - f_std`` (training data only)."""
+    fh = selection_frequency(model, forget)
+    fs = selection_frequency(model, retain_train)
+    sources, deltas = [], []
+    for h, s in zip(fh, fs):
+        d = h - s
+        order = sorted(range(len(d)), key=lambda i: (-float(d[i]), i))   # stable tie-break
+        sources.append(order[:k])
+        deltas.append([round(float(x), 6) for x in d])
+    return sources, deltas
 
 
 def excise_experts(model: ToyMoE, remove: list[int]) -> ToyMoE:
@@ -200,15 +307,16 @@ def param_groups(model: ToyMoE, n_orig: int) -> dict[str, list[nn.Parameter]]:
     return {"target": target, "orig": orig, "router": router, "shared": shared}
 
 
-def relocate(model: ToyMoE, n_orig: int, forget: Batch, retain: Batch, cfg: RexConfig,
-             gen: torch.Generator) -> None:
-    """REX step 2: selective gradient masking + routing differentiation (see module docstring)."""
+def relocate_pushout(model: ToyMoE, n_orig: int, forget: Batch, retain: Batch, cfg: RexConfig,
+                     gen: torch.Generator) -> None:
+    """``prelearned_pushout`` ablation (NOT from the paper): per-loss gradient masking, shared params
+    trained, -log router-mass routing loss, optional unlikelihood push-out on the excised view."""
     groups = param_groups(model, n_orig)
     targets = list(range(n_orig, model.n_experts))
     originals = list(range(n_orig))
     excised_view = active_mask(model.n_experts, targets)
     # weight_decay=0: unselected dense experts get zero (not None) grads; decay would move masked params
-    opt = torch.optim.Adam(model.parameters(), lr=cfg.relocate_lr, weight_decay=0.0)
+    opt = torch.optim.Adam(model.parameters(), lr=cfg.pushout_lr, weight_decay=0.0)
     fb = _batches(len(forget), min(cfg.forget_batch, len(forget)), gen)
     rb = _batches(len(retain), min(cfg.retain_batch, len(retain)), gen)
     model.train()
@@ -231,6 +339,95 @@ def relocate(model: ToyMoE, n_orig: int, forget: Batch, retain: Batch, cfg: RexC
         opt.step()
 
 
+def _target_gate_mass(raw: torch.Tensor, n_orig: int, top_k: int) -> torch.Tensor:
+    """z_t: normalised top-K gate weight on the target experts, from *pre-mask* logits (paper §3.4)."""
+    top_val, top_idx = raw.topk(top_k, dim=-1)
+    return (top_val.softmax(-1) * (top_idx >= n_orig).float()).sum(-1)
+
+
+def _rank_violation(raw: torch.Tensor, n_orig: int, top_k: int, margin: float) -> torch.Tensor:
+    """max(0, delta - (s_K - h_max)) per token: s_K = K-th largest original logit, h_max = max target."""
+    s_k = raw[..., :n_orig].topk(top_k, dim=-1).values[..., -1]
+    h_max = raw[..., n_orig:].max(-1).values
+    return F.relu(margin - (s_k - h_max))
+
+
+def mixed_batch(f: Batch, r: Batch, n_experts: int, n_orig: int
+                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Concatenate target (f) and general (r) sequences -> ids, targets, routed-token mask, per-token
+    domain label ``harm``, and the per-token pre-top-K activation mask (targets hidden on general tokens)."""
+    ids = torch.cat([f.ids, r.ids])
+    targets = torch.cat([f.targets, r.targets])
+    route = torch.cat([_route_sel(f), _route_sel(r)])
+    harm = torch.zeros_like(ids, dtype=torch.bool)
+    harm[: len(f)] = True
+    active = torch.ones((*ids.shape, n_experts), dtype=torch.bool)
+    active[~harm] = torch.arange(n_experts) < n_orig
+    return ids, targets, route, harm, active
+
+
+def paper_losses(model: ToyMoE, n_orig: int, f: Batch, r: Batch, cfg: RexConfig
+                 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+    """One mixed batch -> (loss on target tokens, loss on general tokens, diagnostics).
+
+    Per-token domain label ``harm``; the pre-top-K activation mask hides the target experts from
+    general tokens only. Each toy sequence is single-domain, so attention never mixes domains."""
+    ids, targets, route, harm, active = mixed_batch(f, r, model.n_experts, n_orig)
+    logits, _, raw = model(ids, active=active, return_router_logits=True)
+    ce = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1), ignore_index=IGNORE,
+                         reduction="none").reshape(ids.shape)
+    lab = targets != IGNORE
+    lm_h, lm_s = ce[lab & harm].mean(), ce[lab & ~harm].mean()
+    K = cfg.top_k
+    z = [_target_gate_mass(x, n_orig, K) for x in raw]
+    z_h = torch.stack([zz[route & harm].mean() for zz in z]).mean()
+    z_s = torch.stack([zz[route & ~harm].mean() for zz in z]).mean()
+    mass_h = cfg.mass_floor_weight * F.relu(cfg.mass_floor - z_h)
+    mass_s = cfg.mass_ceiling_weight * F.relu(z_s - cfg.mass_ceiling)
+    rank = torch.stack([_rank_violation(x, n_orig, K, cfg.rank_margin)[route & ~harm].mean()
+                        for x in raw]).mean()
+    diag = {k: float(v.detach()) for k, v in
+            (("lm_harm", lm_h), ("lm_std", lm_s), ("z_harm", z_h), ("z_std", z_s), ("rank", rank))}
+    return lm_h + mass_h, lm_s + mass_s + cfg.rank_weight * rank, diag
+
+
+def relocate_paper(model: ToyMoE, n_orig: int, forget: Batch, retain: Batch, cfg: RexConfig,
+                   gen: torch.Generator) -> list[dict[str, float]]:
+    """Paper §3.3-3.4 relocation F0 -> F1 (in place). Returns per-step diagnostics (first/last kept)."""
+    groups = param_groups(model, n_orig)
+    for p in groups["shared"]:
+        p.requires_grad_(False)                                       # theta_shared frozen
+    trainable = groups["orig"] + groups["target"] + groups["router"]
+    lr = cfg.paper_lr
+    opt = torch.optim.AdamW([
+        {"params": groups["orig"], "lr": lr * cfg.orig_expert_mult},
+        {"params": groups["target"], "lr": lr * cfg.target_expert_mult},
+        {"params": groups["router"], "lr": lr * cfg.router_mult},
+    ], betas=(0.9, 0.999), weight_decay=0.0)
+    steps = cfg.relocate_steps
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 0.5 * (1 + math.cos(math.pi * s / steps)))
+    fb = _batches(len(forget), min(cfg.forget_batch, len(forget)), gen)
+    rb = _batches(len(retain), min(cfg.retain_batch, len(retain)), gen)
+    log: list[dict[str, float]] = []
+    model.train()
+    try:
+        for step in range(steps):
+            f, r = forget.take(next(fb)), retain.take(next(rb))
+            opt.zero_grad(set_to_none=True)
+            loss_h, loss_s, diag = paper_losses(model, n_orig, f, r, cfg)
+            _accumulate(loss_h, groups["target"] + groups["router"])  # D_harm -> theta_harm + routers
+            _accumulate(loss_s, groups["orig"] + groups["router"])    # D_std  -> theta_std + routers
+            torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
+            opt.step()
+            sched.step()
+            if step in (0, steps - 1):
+                log.append({"step": step, **{k: round(v, 5) for k, v in diag.items()}})
+    finally:
+        for p in groups["shared"]:
+            p.requires_grad_(True)
+    return log
+
+
 # ---------------------------------------------------------------- pipeline
 
 def state_sha256(model: nn.Module) -> str:
@@ -246,17 +443,30 @@ def moe_config(cfg: RexConfig, tok: Tokenizer, corpora: Corpora) -> MoEConfig:
                      top_k=cfg.top_k)
 
 
+STAGES = ("B", "F0", "F1", "A1", "A2", "RR")
+
+
 @dataclass
 class RexArtifacts:
     tokenizer: Tokenizer
-    base: ToyMoE
-    full: ToyMoE        # expanded + relocated (targets present)
-    excised: ToyMoE     # targets physically removed ("public" model)
+    base: ToyMoE        # B: prelearned base (knows forget + retain)
+    expanded: ToyMoE    # F0: B + target experts (before relocation)
+    full: ToyMoE        # F1: relocated, targets present (authorised-user model)
+    excised: ToyMoE     # A1: targets physically removed
+    delivered: ToyMoE   # A2: A1 after RMU residual cleanup (delivered base model)
+    rmu_only: ToyMoE    # RR: matched control, the same RMU applied to B
     metrics: dict[str, Any]
 
+    def stage(self, name: str) -> ToyMoE:
+        return {"B": self.base, "F0": self.expanded, "F1": self.full, "A1": self.excised,
+                "A2": self.delivered, "RR": self.rmu_only}[name]
 
-def rex_pipeline(seed: int, config: RexConfig | None = None) -> RexArtifacts:
-    """Train base -> expand -> relocate -> excise -> evaluate. Deterministic from ``seed``."""
+
+def rex_pipeline(seed: int, config: RexConfig | None = None, *, base: ToyMoE | None = None) -> RexArtifacts:
+    """B -> F0 -> F1 -> A1 -> A2, plus RR. Deterministic from ``seed``.
+
+    ``base``: reuse an already trained B from :func:`rex_pipeline` with the same seed, data and base
+    settings (each stage has its own seeded generator, so results are identical to training it here)."""
     cfg = config or default_config()
     prev_threads = torch.get_num_threads()
     prev_det = torch.are_deterministic_algorithms_enabled()
@@ -265,13 +475,29 @@ def rex_pipeline(seed: int, config: RexConfig | None = None) -> RexArtifacts:
     try:
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(seed)
-            return _run(seed, cfg)
+            return _run(seed, cfg, base)
     finally:
         torch.set_num_threads(prev_threads)
         torch.use_deterministic_algorithms(prev_det)
 
 
-def _run(seed: int, cfg: RexConfig) -> RexArtifacts:
+def _stage_metrics(model: ToyMoE, forget: Batch, retain_te: Batch, active: torch.Tensor | None = None
+                   ) -> dict[str, float]:
+    return {"forget_acc": accuracy(model, forget, active), "retain_acc": accuracy(model, retain_te, active),
+            "forget_answer_prob": answer_prob(model, forget, active)}
+
+
+@torch.no_grad()
+def retain_target_selection(model: ToyMoE, b: Batch, n_orig: int) -> float:
+    """Fraction of general tokens (all layers) where an unmasked top-K picks any target expert."""
+    model.eval()
+    _, _, raw = model(b.ids, return_router_logits=True)
+    sel = _route_sel(b)
+    vals = [(r.topk(model.cfg.top_k, -1).indices >= n_orig).any(-1)[sel].float().mean() for r in raw]
+    return float(torch.stack(vals).mean())
+
+
+def _run(seed: int, cfg: RexConfig, base: ToyMoE | None) -> RexArtifacts:
     timings: dict[str, float] = {}
     t0 = time.perf_counter()
     corpora = generate_corpora(seed, cfg.data)
@@ -280,47 +506,83 @@ def _run(seed: int, cfg: RexConfig) -> RexArtifacts:
     forget = encode_examples(tok, corpora.forget, T)
     retain_tr = encode_examples(tok, corpora.retain_train, T)
     retain_te = encode_examples(tok, corpora.retain_test, T)
-    gen = torch.Generator().manual_seed(seed)
     timings["data_s"] = time.perf_counter() - t0
 
     t = time.perf_counter()
-    base = build_model(moe_config(cfg, tok, corpora), seed)
-    train_base(base, forget, retain_tr, cfg, gen)
+    if base is None:
+        base = build_model(moe_config(cfg, tok, corpora), seed)
+        train_base(base, forget, retain_tr, cfg, torch.Generator().manual_seed(seed))
+    base = base.eval()
     timings["base_train_s"] = time.perf_counter() - t
 
     t = time.perf_counter()
+    gen = torch.Generator().manual_seed(seed * 7919 + 1)
     n_orig = base.n_experts
-    full = expand_experts(base, cfg.k_target, gen)
+    expansion: dict[str, Any]
+    reloc_log: list[dict[str, float]] = []
+    if cfg.variant == "paper":
+        sources, deltas = differential_activation(base, forget, retain_tr, cfg.k_target)
+        expanded = expand_experts(base, cfg.k_target, gen, sources=sources, scale=cfg.source_scale,
+                                  noise=cfg.clone_noise, expert_noise=True)
+        expansion = {"method": "differential_activation", "sources": sources, "delta": deltas,
+                     "source_scale": cfg.source_scale, "clone_noise": cfg.clone_noise}
+        full = copy.deepcopy(expanded)
+        reloc_log = relocate_paper(full, n_orig, forget, retain_tr, cfg, gen)
+    else:
+        expanded = expand_experts(base, cfg.k_target, gen)
+        expansion = {"method": "copy_first_k", "sources": [list(range(cfg.k_target))] * cfg.n_layers,
+                     "source_scale": 1.0, "clone_noise": 1e-3}
+        full = copy.deepcopy(expanded)
+        relocate_pushout(full, n_orig, forget, retain_tr, cfg, gen)
+    full = full.eval()
     targets = list(range(n_orig, full.n_experts))
-    relocate(full, n_orig, forget, retain_tr, cfg, gen)
     timings["relocate_s"] = time.perf_counter() - t
 
     t = time.perf_counter()
-    excised = excise_experts(full, targets)
+    excised = excise_experts(full, targets).eval()
     timings["excise_s"] = time.perf_counter() - t
 
     t = time.perf_counter()
+    delivered = rmu_cleanup(excised, forget, retain_tr, cfg, seed)
+    rmu_only = rmu_cleanup(base, forget, retain_tr, cfg, seed)       # matched control: same seed/budget
+    timings["cleanup_s"] = time.perf_counter() - t
+
+    t = time.perf_counter()
+    models = {"B": base, "F0": expanded, "F1": full, "A1": excised, "A2": delivered, "RR": rmu_only}
     m: dict[str, Any] = {
         "seed": seed,
         "paper": PAPER,
+        "variant": cfg.variant,
+        "provenance": VARIANT_PROVENANCE[cfg.variant],
         "config": cfg.to_dict(),
-        "params": {"base": param_count(base), "full": param_count(full), "excised": param_count(excised)},
-        "experts_per_layer": {"base": n_orig, "full": full.n_experts, "excised": excised.n_experts},
+        "stages": {k: _stage_metrics(v, forget, retain_te) for k, v in models.items()},
+        # diagnostic: F0 with targets masked == B with its source experts scaled by s (before relocation)
+        "F0_excised_view": _stage_metrics(expanded, forget, retain_te, active_mask(full.n_experts, targets)),
+        "params": {k: param_count(v) for k, v in models.items()},
+        "experts_per_layer": {k: v.n_experts for k, v in models.items()},
         "target_experts": targets,
-        **{name: {"forget_acc": accuracy(mdl, forget), "retain_acc": accuracy(mdl, retain_te),
-                  "forget_answer_prob": answer_prob(mdl, forget)}
-           for name, mdl in (("base", base), ("full", full), ("excised", excised))},
+        "expansion": expansion,
+        "relocation_log": reloc_log,
         "routing": {"forget_mass_on_targets": route_to_experts(full, forget, targets),
-                    "retain_mass_on_targets": route_to_experts(full, retain_te, targets)},
+                    "retain_mass_on_targets": route_to_experts(full, retain_te, targets),
+                    "retain_target_selection_rate": retain_target_selection(full, retain_te, n_orig)},
         "n_forget": len(corpora.forget), "n_retain_test": len(corpora.retain_test),
         "excised_sha256": state_sha256(excised),
+        "delivered_sha256": state_sha256(delivered),
     }
-    m["retain_drop"] = m["base"]["retain_acc"] - m["excised"]["retain_acc"]
-    m["forget_drop"] = m["base"]["forget_acc"] - m["excised"]["forget_acc"]
+    st = m["stages"]
+    m["summary"] = {
+        "forget_acc": {k: st[k]["forget_acc"] for k in ("B", "F1", "A1", "A2", "RR")},
+        "retain_acc": {k: st[k]["retain_acc"] for k in ("B", "F1", "A1", "A2", "RR")},
+        "forget_answer_prob": {k: st[k]["forget_answer_prob"] for k in ("B", "F1", "A1", "A2", "RR")},
+        "excision_forget_drop": st["F1"]["forget_acc"] - st["A1"]["forget_acc"],    # paper: Delta WMDP
+        "a2_minus_rr_forget": st["A2"]["forget_acc"] - st["RR"]["forget_acc"],      # < 0: REX beats RR
+        "a2_minus_rr_retain": st["A2"]["retain_acc"] - st["RR"]["retain_acc"],
+    }
     timings["eval_s"] = time.perf_counter() - t
     timings["total_s"] = time.perf_counter() - t0
     m["timings_s"] = {k: round(v, 3) for k, v in timings.items()}
-    return RexArtifacts(tok, base, full, excised, m)
+    return RexArtifacts(tok, base, expanded, full, excised, delivered, rmu_only, m)
 
 
 def run_rex_pipeline(seed: int = 0, config: RexConfig | None = None, *,
@@ -333,6 +595,9 @@ def run_rex_pipeline(seed: int = 0, config: RexConfig | None = None, *,
     return art.metrics
 
 
+SAVED = ("full", "excised", "delivered")
+
+
 def default_save_dir(seed: int) -> Path:
     return DEFAULT_TMP / f"seed-{seed}"
 
@@ -340,7 +605,7 @@ def default_save_dir(seed: int) -> Path:
 def save_artifacts(art: RexArtifacts, out: str | Path) -> Path:
     """State dicts -> ``.pt`` (weights only); config/vocab/metrics -> JSON."""
     d = Path(out); d.mkdir(parents=True, exist_ok=True)
-    for name in ("full", "excised"):
+    for name in SAVED:
         model: ToyMoE = getattr(art, name)
         torch.save(model.state_dict(), d / f"{name}.pt")
         (d / f"{name}.config.json").write_text(json.dumps(model.cfg.to_dict(), indent=2))
@@ -350,10 +615,10 @@ def save_artifacts(art: RexArtifacts, out: str | Path) -> Path:
 
 
 def load_model(d: str | Path, name: str = "excised") -> tuple[ToyMoE, Tokenizer]:
-    """Load ``full`` or ``excised`` model + tokenizer saved by :func:`save_artifacts`."""
+    """Load ``full`` (F1), ``excised`` (A1) or ``delivered`` (A2) + tokenizer saved by :func:`save_artifacts`."""
     d = Path(d)
-    if name not in ("full", "excised"):
-        raise ValueError("name must be 'full' or 'excised'")
+    if name not in SAVED:
+        raise ValueError(f"name must be one of {SAVED}")
     cfg = MoEConfig(**json.loads((d / f"{name}.config.json").read_text()))
     model = ToyMoE(cfg)
     model.load_state_dict(torch.load(d / f"{name}.pt", weights_only=True))

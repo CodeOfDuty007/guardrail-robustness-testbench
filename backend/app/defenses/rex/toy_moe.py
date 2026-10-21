@@ -6,7 +6,9 @@ d_model~128, 2 layers, 8 experts, top-2 routing, ~1M params, single-process CPU.
   so experts can be **added** (expansion) or **physically removed** (excision) together with their
   router rows (see ``relocate.py``).
 * ``forward(..., active=mask)`` hides experts from routing by setting their router logits to ``-inf``
-  before top-k. The physically excised model is numerically identical to the full model run with the
+  before top-k (the paper's pre-top-K activation mask). ``mask`` is ``(n_experts,)`` or per token
+  ``(B,T,n_experts)``. ``return_router_logits=True`` also returns the *pre-mask* router logits, which
+  the paper's routing losses are computed on. The physically excised model is numerically identical to the full model run with the
   target experts masked out (tested), which is how relocation trains against the "excised view".
 * Experts are computed densely (tiny model) and combined with the sparse top-k gates; this keeps the
   code short and deterministic. Dropout is 0 everywhere.
@@ -14,7 +16,7 @@ d_model~128, 2 layers, 8 experts, top-2 routing, ~1M params, single-process CPU.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
@@ -57,16 +59,18 @@ class MoELayer(nn.Module):
     def n_experts(self) -> int:
         return len(self.experts)
 
-    def forward(self, x: torch.Tensor, active: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (output, router_probs over all experts). ``active``: bool (n_experts,) mask."""
-        logits = x @ self.router.t()                                   # (B,T,E)
-        if active is not None:
-            logits = logits.masked_fill(~active, float("-inf"))
+    def forward(self, x: torch.Tensor, active: torch.Tensor | None = None
+                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns (output, router_probs over all experts, pre-mask router logits).
+
+        ``active``: bool mask, (n_experts,) or per token (B,T,n_experts)."""
+        raw = x @ self.router.t()                                      # (B,T,E)
+        logits = raw if active is None else raw.masked_fill(~active, float("-inf"))
         probs = logits.softmax(-1)                                     # router distribution (for losses)
         top_val, top_idx = logits.topk(self.top_k, dim=-1)
         gates = torch.zeros_like(logits).scatter(-1, top_idx, top_val.softmax(-1))  # renormalised top-k
         outs = torch.stack([e(x) for e in self.experts], dim=-2)      # (B,T,E,D) dense, tiny
-        return (gates.unsqueeze(-1) * outs).sum(-2), probs
+        return (gates.unsqueeze(-1) * outs).sum(-2), probs, raw
 
 
 class Block(nn.Module):
@@ -78,13 +82,13 @@ class Block(nn.Module):
         self.moe = MoELayer(cfg.d_model, cfg.d_ff, cfg.n_experts, cfg.top_k)
 
     def forward(self, x: torch.Tensor, causal: torch.Tensor,
-                active: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+                active: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         h = self.ln1(x)
         # right-padded batches + causal mask: real tokens never attend to padding, so no pad mask
         a, _ = self.attn(h, h, h, attn_mask=causal, need_weights=False)
         x = x + a
-        m, probs = self.moe(self.ln2(x), active)
-        return x + m, probs
+        m, probs, raw = self.moe(self.ln2(x), active)
+        return x + m, probs, raw
 
 
 class ToyMoE(nn.Module):
@@ -104,18 +108,35 @@ class ToyMoE(nn.Module):
     def moe_layers(self) -> list[MoELayer]:
         return [cast(Block, b).moe for b in self.blocks]
 
-    def forward(self, ids: torch.Tensor, active: torch.Tensor | None = None) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        """ids (B,T) -> (logits (B,T,V), [router_probs (B,T,E) per layer])."""
+    def _run_blocks(self, ids: torch.Tensor, active: torch.Tensor | None, upto: int | None
+                    ) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
         T = ids.shape[1]
         if T > self.cfg.max_len:
             raise ValueError(f"sequence length {T} > max_len {self.cfg.max_len}")
         causal = torch.triu(torch.ones(T, T, dtype=torch.bool, device=ids.device), diagonal=1)
         x = self.tok(ids) + self.pos(torch.arange(T, device=ids.device))
-        all_probs = []
-        for b in self.blocks:
-            x, p = b(x, causal, active)
-            all_probs.append(p)
-        return self.head(self.ln_f(x)), all_probs
+        all_probs, all_raw = [], []
+        for i, b in enumerate(self.blocks):
+            x, p, r = b(x, causal, active)
+            all_probs.append(p); all_raw.append(r)
+            if upto is not None and i == upto:
+                break
+        return x, all_probs, all_raw
+
+    def forward(self, ids: torch.Tensor, active: torch.Tensor | None = None,
+                return_router_logits: bool = False) -> Any:
+        """ids (B,T) -> (logits (B,T,V), [router_probs (B,T,E) per layer]).
+
+        With ``return_router_logits`` a third element is added: [pre-mask router logits per layer]."""
+        x, probs, raw = self._run_blocks(ids, active, None)
+        logits = self.head(self.ln_f(x))
+        return (logits, probs, raw) if return_router_logits else (logits, probs)
+
+    def hidden(self, ids: torch.Tensor, layer: int, active: torch.Tensor | None = None) -> torch.Tensor:
+        """Residual-stream hidden state (B,T,D) after block ``layer`` (the RMU monitor layer)."""
+        if not 0 <= layer < len(self.blocks):
+            raise ValueError(f"layer {layer} out of range")
+        return self._run_blocks(ids, active, layer)[0]
 
 
 def build_model(cfg: MoEConfig, seed: int) -> ToyMoE:

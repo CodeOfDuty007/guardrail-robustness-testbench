@@ -21,7 +21,8 @@ differentiation, and expert excision) introduced in:
   (CC BY 4.0, https://creativecommons.org/licenses/by/4.0/). Descriptions of the
   method in this repository are paraphrased from it, with changes: the method is
   scaled down to a ~1M-parameter toy model with a synthetic forget set, and the
-  "push-out" loss term is this repository's own toy interpretation (see README).
+  "push-out" loss term, used only in the non-default "prelearned_pushout" ablation,
+  is this repository's own addition and is not from the paper (see README).
 
 License check (Sprint 0): the authors' reference implementation,
 https://github.com/AI45Lab/REX, is licensed under the Apache License 2.0. It targets
