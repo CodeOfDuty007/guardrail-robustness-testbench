@@ -496,9 +496,15 @@ async def replay(spec: dict, target: Target, judge=None) -> Score:
     cipher = get_cipher(spec["cipher_type"], spec["seed"])
     ct = cipher.encode(spec["plaintext_prompt"])
     instr = cipher.decode_instruction()
-    strategy = STRATEGY_REGISTRY[spec["strategy_name"]]
+    name = spec["strategy_name"]
+    if name in STRATEGY_REGISTRY:
+        prefix = STRATEGY_REGISTRY[name].prefix
+    elif get_family(name).kind == "single":  # family rows: plaintext already holds the generated framing
+        prefix = ""
+    else:
+        raise ValueError(f"replay of meta-family {name!r} attempts is not supported (multi-turn)")
     marker = f"[CIPHER={cipher.name};SEED={cipher.seed}] {ct}" if cipher.name != "NONE" else spec["plaintext_prompt"]
-    user = f"{strategy.prefix}{instr}\n{marker}" if instr else f"{strategy.prefix}{marker}"
+    user = f"{prefix}{instr}\n{marker}" if instr else f"{prefix}{marker}"
     res = await asyncio.wait_for(target.send(obj.system_prompt, user), settings.target_timeout_s)
     return await score_attempt(objective_text=obj.text, response=res.text, canary_regex=obj.canary_regex, judge=judge,
                                judge_model=getattr(judge, "model", "regex-only") if judge else "regex-only")

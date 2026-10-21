@@ -42,3 +42,12 @@ async def test_encoding_family_matches_legacy_direct_cipher_wrap_golden():
 def test_family_cells_cross_product():
     cfg = RunConfig(families=["encoding"], ciphers=["NONE", "STANDARD_BASE64"])
     assert family_cells(cfg) == [("encoding", "NONE"), ("encoding", "STANDARD_BASE64")]
+
+
+async def test_replay_accepts_family_attempts():
+    from app.engine.orchestrator import replay
+    from app.engine.targets.mock import MockTarget
+    o = canary_objectives(1337)[1]
+    sc = await replay({"seed": 1337, "objective_id": o.id, "cipher_type": "NONE", "strategy_name": "encoding",
+                       "plaintext_prompt": o.text}, MockTarget("mock-weak-1b", 1337, guard_strength=0.0))
+    assert sc.regex_verdict is not None
