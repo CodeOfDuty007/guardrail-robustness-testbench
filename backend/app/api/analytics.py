@@ -99,7 +99,9 @@ def overview(f: Filters = Depends(filters)):
         per_model[r["target_model"]].append(r)
     with get_engine().connect() as c:
         active = c.execute(text("SELECT COUNT(*) FROM runs WHERE status='running'")).scalar_one()
-    return {"total_attempts": n, "confirmed": sum(bool(r["bypass"]) for r in rows),
+    refused = len(flat_rows(Filters(**{**f.__dict__, "include_attacker_refused": True}), "generated_by")) - n
+    # attacker_refused: attempts whose attacker model declined; NOT in total_attempts or any rate
+    return {"total_attempts": n, "attacker_refused": refused, "confirmed": sum(bool(r["bypass"]) for r in rows),
             "bypass_rate": _rate(rows)["rate"] if n else 0.0,
             "filter_evasion_rate": sum(bool(r["filter_evaded"]) for r in rows) / n if n else 0.0,
             "spend_usd": sum(r["cost_usd"] or 0 for r in rows), "active_runs": active,  # global (not filter-scoped)
