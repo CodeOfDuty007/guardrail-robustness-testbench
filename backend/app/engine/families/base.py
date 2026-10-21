@@ -124,7 +124,7 @@ async def ask_attacker_ex(attacker: Target | None, technique_brief: str, objecti
     "attacker_refused" = the attacker model declined (aligned attackers often do). Refused attempts
     send the fallback and must be reported separately — never counted as the TARGET holding.
     """
-    from app.engine.scorers.composite import REFUSAL_RE
+    from app.engine.scorers.composite import is_attacker_refusal
     if attacker is None:
         return fallback, "fallback"
     hist = "".join(f"\n[{t.role}] {t.content}" for t in (history or []))
@@ -135,7 +135,7 @@ async def ask_attacker_ex(attacker: Target | None, technique_brief: str, objecti
     text = (r.text or "").translate(_INVISIBLE).strip()
     if not text:
         return fallback, "fallback"
-    if REFUSAL_RE.search(text[:200]):
+    if is_attacker_refusal(text):
         return fallback, "attacker_refused"
     return text, "attacker"
 

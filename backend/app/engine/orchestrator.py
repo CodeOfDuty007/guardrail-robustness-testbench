@@ -24,7 +24,7 @@ from app.db.telemetry.session import get_engine
 from app.defenses import DEFENSE_REGISTRY
 from app.engine.converters.ciphers import get_cipher
 from app.engine.families import CandidatePrompt, Turn, family_rng, get_family
-from app.engine.scorers.composite import REFUSAL_RE, Score, make_llamaguard, make_llm_judge, score_attempt
+from app.engine.scorers.composite import Score, is_attacker_refusal, make_llamaguard, make_llm_judge, score_attempt
 from app.engine.strategies import STRATEGY_REGISTRY
 from app.engine.targets.base import LiteLLMTarget, OpenAICompatTarget, Target, TargetResult
 from app.engine.targets.mock import MockTarget, sim_family
@@ -480,7 +480,7 @@ async def execute_run(run_id: int, cfg: RunConfig) -> None:
                                        "from its last reply. Output only the rewritten request.",
                                        f"Attempt {i}. Request: {objective}{hist}")
                     out = (r.text or "").strip()
-                    if out and REFUSAL_RE.search(out[:200]):
+                    if out and is_attacker_refusal(out):
                         raise _AttackerRefused()
                     return out or objective
             run = s.get(m.Run, run_id)
