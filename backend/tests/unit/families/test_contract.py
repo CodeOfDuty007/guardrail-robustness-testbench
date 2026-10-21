@@ -19,6 +19,7 @@ def test_every_family_satisfies_contract():
         assert f.citation and f.owasp_tag and f.atlas_tag
         assert f.category in ("jailbreak", "injection") and f.kind in ("single", "meta")
     assert [f["name"] for f in list_families()]  # plain JSON view
+    assert {f["channel"] for f in list_families()} <= {"direct", "indirect"}
 
 
 def test_family_rng_is_stable_and_keyed():
