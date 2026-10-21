@@ -278,10 +278,10 @@ function ProfileTab({ f }: { f: F }) {
         </RadarChart></ResponsiveContainer>
       </ChartCard>
       <ChartCard title="Does a cipher add lift on top of the framing? Family alone vs family + cipher" height={300} status={st(cp, !comp.bars.length)} label="Grouped bar chart of bypass rate per family, alone versus cipher-wrapped, with 95% confidence intervals"
-        note={[`Compared only on matching cells (same model, dataset, objective and defense).${cp.data?.scope?.cipher_filter_ignored ? ' Your cipher filter is ignored here.' : ''}${refusedTxt(cp.data?.attacker_refused)}`,
+        note={[`Compared only on matching cells: same model, dataset, objective and defense, within the same run and try, so both bars share one framing. The change is the average of per-cell changes (each cell counts once); its 95% range comes from resampling cells.${cp.data?.scope?.cipher_filter_ignored ? ' Your cipher filter is ignored here.' : ''}${refusedTxt(cp.data?.attacker_refused)}`,
           comp.unmatched.length ? `Not comparable: ${comp.unmatched.map((u) => `${u.family} (${u.note})`).join('; ')}.` : null,
           cp.data && !comp.bars.length ? 'To fill this in, add a family to "wrap with cipher" in New Run and include the NONE cipher.' : null].filter(Boolean).join(' ')}
-        table={{ headers: ['Family', 'Alone', 'With cipher', 'Change (pp)', '95% range (pp)', 'Cells', 'Attempts (alone / cipher)'], rows: comp.bars.map((b) => [b.family, P(b.bare), P(b.ciphered), b.delta == null ? null : +(b.delta * 100).toFixed(1), b.deltaLo == null || b.deltaHi == null ? null : `${(b.deltaLo * 100).toFixed(1)} to ${(b.deltaHi * 100).toFixed(1)}`, b.cells, `${b.bareN} / ${b.ciphN}`]) }}>
+        table={{ headers: ['Family', 'Alone', 'With cipher', 'Change (pp, mean per cell)', '95% range (pp)', 'Matched cells', 'Attempts (alone / cipher)'], rows: comp.bars.map((b) => [b.family, P(b.bare), P(b.ciphered), b.delta == null ? null : +(b.delta * 100).toFixed(1), b.ciText, b.cells, `${b.bareN} / ${b.ciphN}`]) }}>
         <ResponsiveContainer><BarChart data={comp.bars}><CartesianGrid stroke="var(--border)" /><XAxis dataKey="family" {...AX} /><YAxis domain={[0, 1]} tickFormatter={pctTick} {...AX} /><Tooltip {...TIP} formatter={pctFmt} /><Legend />
           <Bar dataKey="bare" name="family alone" fill={COLORS[1]} isAnimationActive={false}><ErrorBar dataKey="bareErr" stroke="#fff" /></Bar>
           <Bar dataKey="ciphered" name="family + cipher" fill={COLORS[0]} isAnimationActive={false}><ErrorBar dataKey="ciphErr" stroke="#fff" /></Bar>

@@ -306,7 +306,7 @@ def timeline(f: Filters = Depends(filters)):
 # ---------------------------------------------------------------------------------------------------------
 FAMILY_ONLY = "family_raw IS NOT NULL"
 _PROFILE_COLS = ("family_raw, category, channel, delivery, cipher_type, target_model, dataset_name, objective_id, "
-                 "defense, bypass")
+                 "defense, run_id, iteration, bypass")
 
 
 def atlas_parent(tag: str | None) -> str | None:
@@ -346,13 +346,41 @@ def _mode(vals: list) -> str | None:
     return max(sorted(set(vals)), key=vals.count) if vals else None
 
 
-def _diff(arm: dict, base: dict) -> dict:
-    """Difference of two proportions with a 95% Wald CI, clamped to [-1, 1]."""
-    if not (arm["n"] and base["n"]):
-        return {"delta": None, "delta_ci_low": None, "delta_ci_high": None}
-    d = arm["rate"] - base["rate"]
-    se = math.sqrt(arm["rate"] * (1 - arm["rate"]) / arm["n"] + base["rate"] * (1 - base["rate"]) / base["n"])
-    return {"delta": d, "delta_ci_low": max(-1.0, d - 1.96 * se), "delta_ci_high": min(1.0, d + 1.96 * se)}
+BOOT_RESAMPLES = 2000
+BOOT_SEED = 0
+
+
+def cell_bootstrap(deltas: list[float]) -> dict:
+    """Mean per-cell delta with a cluster (cell-level) percentile bootstrap 95% interval.
+
+    Deterministic (fixed seed). With fewer than 2 cells there is no interval: CI is null with a note, never a
+    zero-width range."""
+    if not deltas:
+        return {"delta": None, "delta_ci_low": None, "delta_ci_high": None, "delta_note": "no matched cells"}
+    d = np.asarray(deltas, float)
+    if len(d) < 2:
+        return {"delta": float(d.mean()), "delta_ci_low": None, "delta_ci_high": None,
+                "delta_note": "only 1 matched cell: no confidence interval"}
+    rng = np.random.default_rng(BOOT_SEED)
+    means = d[rng.integers(0, len(d), size=(BOOT_RESAMPLES, len(d)))].mean(axis=1)
+    lo, hi = np.percentile(means, [2.5, 97.5])
+    return {"delta": float(d.mean()), "delta_ci_low": float(lo), "delta_ci_high": float(hi), "delta_note": None}
+
+
+def matched_delta(cells: dict, pick) -> dict:
+    """Compare a cipher arm (`pick(arms)` -> that cell's ciphered rows) with the bare arm (cipher NONE) on cells
+    that have BOTH. The delta is computed WITHIN each cell and averaged with equal weight per cell, so unequal
+    attempt counts across cells can't manufacture a difference. Per-arm rates (Wilson CIs) pool the matched rows."""
+    deltas: list[float] = []
+    arm: list[dict] = []
+    base: list[dict] = []
+    for arms in cells.values():
+        ca, ba = pick(arms), arms.get("NONE") or []
+        if ca and ba:
+            deltas.append(_rate(ca)["rate"] - _rate(ba)["rate"])
+            arm += ca; base += ba
+    return {"matched_cells": len(deltas), "n_cells": len(deltas), "ciphered": _rate(arm), "bare": _rate(base),
+            **cell_bootstrap(deltas)}
 
 
 @router.get("/family-heatmap")
@@ -403,40 +431,30 @@ def family_radar(f: Filters = Depends(filters)):
 @router.get("/compounding")
 def compounding(f: Filters = Depends(filters)):
     """Per family: bare (cipher NONE) vs family + cipher, compared ONLY on matched cells
-    (model x dataset x objective x defense) present in both arms — the defense_ablation pattern."""
+    (model x dataset x objective x defense x run x iteration) present in both arms. Within one run the orchestrator
+    generates ONE candidate per (objective, family, iteration) and cipher-wraps it per cell, so keying on run and
+    iteration means both arms share the same framing. Delta = mean of per-cell deltas, cell-bootstrap 95% CI."""
     f2 = Filters(**{**f.__dict__, "cipher": None})  # both arms are needed, so a cipher filter can't apply
     rows = _profile_rows(f2)
     cells: dict[str, dict[tuple, dict[str, list[dict]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for r in rows:
-        key = (r["target_model"], r["dataset_name"], r["objective_id"], r["defense"])
+        key = (r["target_model"], r["dataset_name"], r["objective_id"], r["defense"], r["run_id"], r["iteration"])
         cells[r["family_raw"]][key][r["cipher_type"]].append(r)
-    scope = {"comparison": "matched cells (model, dataset, objective, defense)", "cipher_filter_ignored": bool(f.cipher),
+    scope = {"comparison": "matched cells (model, dataset, objective, defense, run, iteration)",
+             "delta": "mean of per-cell deltas (equal weight per cell)",
+             "delta_ci": f"cell-level percentile bootstrap, {BOOT_RESAMPLES} resamples, seed {BOOT_SEED}",
+             "cipher_filter_ignored": bool(f.cipher),
              "filters_applied": {k: v for k, v in f2.__dict__.items() if v not in (None, "", False)}}
     out = []
     for fam in sorted(cells):
         fc = cells[fam]
         ciphers = sorted({c for arms in fc.values() for c in arms} - {"NONE"})
-        per_cipher = []
-        for c in ciphers:
-            arm, base, nc = [], [], 0
-            for arms in fc.values():
-                if arms.get(c) and arms.get("NONE"):
-                    arm += arms[c]; base += arms["NONE"]; nc += 1
-            ra, rb = _rate(arm), _rate(base)
-            per_cipher.append({"cipher": c, "matched_cells": nc, "ciphered": ra, "bare": rb, **_diff(ra, rb)})
-        ciph_all: list[dict] = []
-        bare_all: list[dict] = []
-        n_cells = 0
-        for arms in fc.values():  # pooled: each matched cell's ciphered attempts vs its bare ones
-            ca = [r for c, v in arms.items() if c != "NONE" for r in v]
-            if ca and arms.get("NONE"):
-                ciph_all += ca; bare_all += arms["NONE"]; n_cells += 1
-        ra, rb = _rate(ciph_all), _rate(bare_all)
-        note = (None if n_cells else "never run with a cipher; add it to wrap_with_cipher" if not ciphers
-                else "never run bare (cipher NONE) on the same cells; include NONE in the run ciphers")
+        per_cipher = [{"cipher": c, **matched_delta(fc, lambda arms, c=c: arms.get(c) or [])} for c in ciphers]
+        pooled = matched_delta(fc, lambda arms: [r for c, v in arms.items() if c != "NONE" for r in v])
+        note = (None if pooled["n_cells"] else "never run with a cipher; add it to wrap_with_cipher" if not ciphers
+                else "never run bare (cipher NONE) in the same run and iteration; include NONE in the run ciphers")
         cats = [r["category"] for arms in fc.values() for v in arms.values() for r in v]
-        out.append({"family": fam, "category": _mode(cats), "matched_cells": n_cells, "bare": rb, "ciphered": ra,
-                    **_diff(ra, rb), "by_cipher": per_cipher, "note": note})
+        out.append({"family": fam, "category": _mode(cats), **pooled, "by_cipher": per_cipher, "note": note})
     return {"families": out, "scope": scope, "attacker_refused": _refused(f2)}
 
 

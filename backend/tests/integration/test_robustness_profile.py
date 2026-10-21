@@ -19,9 +19,9 @@ def _run(c, **body) -> int:
 
 
 def _sql(stmt: str, **p) -> None:
+    """Edit telemetry in place. NO forced rebuild: the ordinary replica refresh must notice the edit."""
     with get_engine().begin() as con:
         con.execute(text(stmt), p)
-    analytics_store._refresh(force=True)  # the replica checksum doesn't cover these columns
 
 
 @pytest.fixture()
@@ -79,22 +79,69 @@ def test_model_filter_and_radar_overlay(prof):
 
 
 def test_compounding_uses_matched_cells_only(prof):
+    # QA cross-run case: a second, bare-only persuasion run on the SAME model must not join the first run's
+    # cells (each run generates its own framing; cells are keyed on run + iteration)
+    weak2 = prof.post("/api/providers", json={"label": "weak2", "kind": "mock", "model_name": "mock-weak-1b"}).json()["id"]
+    _run(prof, target_provider_id=weak2, families=["persuasion"], ciphers=["NONE"])
     out = prof.get("/api/analytics/compounding?cipher=ROT_N").json()
-    assert out["scope"]["cipher_filter_ignored"] is True
+    assert out["scope"]["cipher_filter_ignored"] is True and "run" in out["scope"]["comparison"]
     d = {x["family"]: x for x in out["families"]}
     p = d["persuasion"]
-    # 2 models x 3 objectives matched; the third model's bare-only cells are excluded
-    assert p["matched_cells"] == 6 and p["bare"]["n"] == 6 and p["ciphered"]["n"] == 12
+    # 2 models x 3 objectives matched; bare-only cells (third model, second weak run) are excluded
+    assert p["matched_cells"] == p["n_cells"] == 6 and p["bare"]["n"] == 6 and p["ciphered"]["n"] == 12
     by = {x["cipher"]: x for x in p["by_cipher"]}
     assert set(by) == {"STANDARD_BASE64", "ROT_N"}
     for x in by.values():
         assert x["matched_cells"] == 6 and x["bare"]["n"] == x["ciphered"]["n"] == 6
         _ci_ok(x["bare"]); _ci_ok(x["ciphered"])
-    assert p["delta"] == pytest.approx(p["ciphered"]["rate"] - p["bare"]["rate"])
     assert -1 <= p["delta_ci_low"] <= p["delta"] <= p["delta_ci_high"] <= 1
     rp = d["roleplay_persona"]  # never ciphered -> note, not a fabricated zero
-    assert rp["matched_cells"] == 0 and rp["delta"] is None and "wrap_with_cipher" in rp["note"]
+    assert rp["matched_cells"] == 0 and rp["delta"] is None and rp["delta_ci_low"] is None and "wrap_with_cipher" in rp["note"]
     assert not LEGACY & set(d)
+    assert prof.get("/api/analytics/compounding?cipher=ROT_N").json() == out  # bootstrap is deterministic
+
+
+def _rows(*bits):
+    return [{"bypass": bool(b)} for b in bits]
+
+
+def test_delta_is_within_cell_equal_weight():
+    """Codex example: unequal attempt counts per cell must not manufacture a delta when every cell has none."""
+    from app.api.analytics import matched_delta
+    cells = {"c1": {"NONE": _rows(1), "B64": _rows(1, 1, 1)},     # bare 100%, cipher 100%
+             "c2": {"NONE": _rows(0, 0, 0), "B64": _rows(0)}}     # bare 0%,   cipher 0%
+    r = matched_delta(cells, lambda arms: arms.get("B64") or [])
+    assert r["n_cells"] == 2 and r["delta"] == 0.0
+    assert r["bare"]["n"] == 4 and r["ciphered"]["n"] == 4  # pooled arms would show 25% vs 75% (a fake +50 pp)
+    assert r["delta_ci_low"] == r["delta_ci_high"] == 0.0
+
+
+def test_bootstrap_ci_null_below_two_cells_and_deterministic():
+    from app.api.analytics import cell_bootstrap, matched_delta
+    one = matched_delta({"c1": {"NONE": _rows(0), "B64": _rows(1)}}, lambda arms: arms.get("B64") or [])
+    assert one["n_cells"] == 1 and one["delta"] == 1.0 and one["delta_ci_low"] is None and one["delta_ci_high"] is None
+    assert one["delta_note"]
+    none = cell_bootstrap([])
+    assert none["delta"] is None and none["delta_ci_low"] is None
+    ds = [0.0, 1.0, 0.5, -0.5, 1.0, 0.0, 0.0]
+    a, b = cell_bootstrap(ds), cell_bootstrap(ds)
+    assert a == b and a["delta_ci_low"] < a["delta"] < a["delta_ci_high"]
+    assert -1 <= a["delta_ci_low"] and a["delta_ci_high"] <= 1
+
+
+def test_ordinary_refresh_sees_in_place_attribute_edits(prof):
+    """Replica staleness (Codex #1): these columns are written/edited after a row is visible. No forced rebuild."""
+    q = "SELECT family_raw, category, channel, delivery, generated_by, technique, cipher_type FROM flat WHERE attempt_id = ?"
+    aid, gen = analytics_store.query("SELECT attempt_id, generated_by FROM flat WHERE family_raw = 'persuasion' "
+                                     "ORDER BY attempt_id LIMIT 1")[0].values()
+    same_len = "attacker" if gen == "fallback" else "fallback"  # same length: a LENGTH() checksum would miss it
+    _sql("UPDATE attempts SET family='many_shot', category='injection', channel='indirect', delivery='visible', "
+         "generated_by=:g, technique='edited', cipher_type='ROT_N' WHERE id=:i", g=same_len, i=aid)
+    assert analytics_store.query(q, [aid])[0] == {
+        "family_raw": "many_shot", "category": "injection", "channel": "indirect", "delivery": "visible",
+        "generated_by": same_len, "technique": "edited", "cipher_type": "ROT_N"}
+    _sql("UPDATE attempts SET generated_by=:g WHERE id=:i", g=gen, i=aid)  # same-length swap back
+    assert analytics_store.query(q, [aid])[0]["generated_by"] == gen
 
 
 def test_injection_breakdown_direct_then_indirect(prof):

@@ -8,7 +8,8 @@ export type FamilyMeta = Rate & {
 export type HeatmapResp = { models: string[]; families: FamilyMeta[]; cells: (Rate & { family: string; model: string })[]; attacker_refused: number }
 export type RadarResp = { families: string[]; models: { model: string; families: Record<string, Rate> }[]; attacker_refused: number }
 export type CompoundingFamily = {
-  family: string; category: string | null; matched_cells: number; bare: Rate; ciphered: Rate
+  family: string; category: string | null; matched_cells: number; n_cells?: number; bare: Rate; ciphered: Rate
+  delta_note?: string | null
   delta: number | null; delta_ci_low: number | null; delta_ci_high: number | null; note: string | null
   by_cipher: { cipher: string; matched_cells: number; bare: Rate; ciphered: Rate; delta: number | null }[]
 }
@@ -46,13 +47,20 @@ export function radarData(r: RadarResp | null | undefined, only?: string[]) {
 
 const err = (x: Rate): [number, number] => [x.rate - x.ci_low, x.ci_high - x.rate]
 
+/** "-5.0 to 12.5" (pp), or the backend's reason when there is no interval (e.g. fewer than 2 matched cells). */
+export function ciText(f: Pick<CompoundingFamily, 'delta_ci_low' | 'delta_ci_high' | 'delta_note'>): string {
+  if (f.delta_ci_low == null || f.delta_ci_high == null) return f.delta_note ?? 'no interval'
+  return `${(f.delta_ci_low * 100).toFixed(1)} to ${(f.delta_ci_high * 100).toFixed(1)}`
+}
+
 /** Bare vs ciphered bars for families that have matched cells; the others are listed with the reason. */
 export function compoundingBars(fams: CompoundingFamily[] | null | undefined) {
   const list = fams ?? []
   return {
     bars: list.filter((f) => f.matched_cells > 0).map((f) => ({
       family: f.family, bare: f.bare.rate, ciphered: f.ciphered.rate, bareErr: err(f.bare), ciphErr: err(f.ciphered),
-      bareN: f.bare.n, ciphN: f.ciphered.n, delta: f.delta, deltaLo: f.delta_ci_low, deltaHi: f.delta_ci_high, cells: f.matched_cells,
+      bareN: f.bare.n, ciphN: f.ciphered.n, delta: f.delta, deltaLo: f.delta_ci_low, deltaHi: f.delta_ci_high,
+      cells: f.n_cells ?? f.matched_cells, ciText: ciText(f),
     })),
     unmatched: list.filter((f) => f.matched_cells === 0).map((f) => ({ family: f.family, note: f.note ?? 'no matched cells' })),
   }

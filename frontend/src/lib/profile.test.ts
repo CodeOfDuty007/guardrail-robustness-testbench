@@ -56,7 +56,18 @@ describe('compoundingBars', () => {
     expect(bars[0]).toMatchObject({ family: 'persuasion', bare: 0.1, ciphered: 0.5, bareN: 10, cells: 6, delta: 0.4, deltaLo: 0.05, deltaHi: 0.75 })
     expect(bars[0].bareErr[0]).toBeCloseTo(0.1)
     expect(bars[0].ciphErr[1]).toBeCloseTo(0.1)
+    expect(bars[0].ciText).toBe('5.0 to 75.0')
     expect(unmatched).toEqual([{ family: 'roleplay_persona', note: 'never run with a cipher' }])
+  })
+  it('prefers n_cells and shows the reason when the CI is null (fewer than 2 cells)', () => {
+    const one: CompoundingFamily = {
+      family: 'many_shot', category: 'jailbreak', matched_cells: 1, n_cells: 1, bare: R(0, 1), ciphered: R(1, 1), delta: 1,
+      delta_ci_low: null, delta_ci_high: null, delta_note: 'only 1 matched cell: no confidence interval', note: null, by_cipher: [],
+    }
+    const { bars } = compoundingBars([one])
+    expect(bars[0].cells).toBe(1)
+    expect(bars[0].ciText).toBe('only 1 matched cell: no confidence interval')
+    expect(bars[0].deltaLo).toBeNull()
   })
 })
 
