@@ -36,7 +36,9 @@ export default function Dashboard() {
                 <span className="muted">{r.dataset_name} · seed {r.seed} · spent ${r.spent_usd.toFixed(4)}</span></div>))}
               {!runs.data?.length && <span className="muted">—</span>}</div>
           </Card>
-          <div className="muted mono">Filter evasion {pct(d.filter_evasion_rate)} · confirmed {d.confirmed}/{d.total_attempts}</div>
+          <div className="muted mono">Filter evasion {pct(d.filter_evasion_rate)} · confirmed {d.confirmed}/{d.total_attempts}
+            {d.attacker_refused > 0 && <> · <span title="The attacker model declined to write attack text, so the target was never called. These attempts are excluded from every rate.">
+              {d.attacker_refused} attacker-refused (excluded)</span></>}</div>
         </>)}
       </State>
     </div>

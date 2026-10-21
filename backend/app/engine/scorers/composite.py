@@ -43,9 +43,9 @@ _DECLINE_RE = re.compile(rf"\W*{ATTACKER_DECLINE_MARKER}\W*", re.I)
 
 
 def is_attacker_refusal(text: str) -> bool:
-    """True only when the attacker's reply is the decline marker (first non-empty line, any wrapping)."""
-    first = next((ln for ln in text.strip().splitlines() if ln.strip()), "")
-    return bool(_DECLINE_RE.fullmatch(first))
+    """True only when the attacker's WHOLE reply is the decline marker (optionally wrapped in quotes/markdown).
+    Anything else — e.g. the marker followed by attack text — is attack text and is sent to the target."""
+    return bool(_DECLINE_RE.fullmatch(text.strip()))
 
 
 def is_refusal(response: str) -> bool:

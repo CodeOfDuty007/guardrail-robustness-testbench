@@ -87,7 +87,8 @@ def list_families() -> list[dict]:
     """Plain-JSON view for API/MCP (no PyRIT or class types leak)."""
     load_all()
     return [{"name": f.name, "citation": f.citation, "owasp_tag": f.owasp_tag, "atlas_tag": f.atlas_tag,
-             "category": f.category, "kind": f.kind, "wrap_with_cipher": f.wrap_with_cipher}
+             "category": f.category, "kind": f.kind, "wrap_with_cipher": f.wrap_with_cipher,
+             "channel": getattr(f, "channel", "direct")}
             for f in sorted(FAMILY_REGISTRY.values(), key=lambda f: (f.category, f.name))]
 
 

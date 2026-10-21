@@ -83,8 +83,11 @@ def filter_options():
     def distinct(col: str) -> list:
         return [r[col] for r in query(f"SELECT DISTINCT {col} FROM flat WHERE {col} IS NOT NULL ORDER BY 1")]
     rng = query("SELECT MIN(created_at) lo, MAX(created_at) hi FROM flat")[0]
-    runs = query("SELECT run_id, ANY_VALUE(run_name) AS run_label, COUNT(*) n FROM flat GROUP BY 1 ORDER BY 1 DESC")
-    runs = [{"run_id": r["run_id"], "name": r["run_label"], "n": r["n"]} for r in runs]
+    # n counts only attempts that reach the rates (attacker-refused excluded, as in Filters.where)
+    runs = query("SELECT run_id, ANY_VALUE(run_name) AS run_label, "
+                 "COUNT(*) FILTER (WHERE COALESCE(generated_by, '') <> 'attacker_refused') n, "
+                 "COUNT(*) FILTER (WHERE generated_by = 'attacker_refused') refused FROM flat GROUP BY 1 ORDER BY 1 DESC")
+    runs = [{"run_id": r["run_id"], "name": r["run_label"], "n": r["n"], "attacker_refused": r["refused"]} for r in runs]
     return {"models": distinct("target_model"), "ciphers": distinct("cipher_type"),
             "strategies": distinct("strategy_name"), "defenses": distinct("defense"), "runs": runs,
             "date_min": str(rng["lo"])[:10] if rng["lo"] else None, "date_max": str(rng["hi"])[:10] if rng["hi"] else None}
@@ -328,8 +331,9 @@ def report(format: str = "json", f: Filters = Depends(filters)):
     pc = lambda x: "—" if x is None else f"{x * 100:.1f}%"  # noqa: E731
     num = lambda x, d=3: "—" if x is None else f"{x:.{d}f}"  # noqa: E731
     sections = [
-        ("Overview", _table(["Attempts", "Confirmed bypasses", "Bypass rate", "Passed the filter"],
-                            [[rep["overview"]["total_attempts"], rep["overview"]["confirmed"], pc(rep["overview"]["bypass_rate"]), pc(rep["overview"]["filter_evasion_rate"])]])),
+        ("Overview", _table(["Attempts", "Confirmed bypasses", "Bypass rate", "Passed the filter", "Attacker refused (excluded)"],
+                            [[rep["overview"]["total_attempts"], rep["overview"]["confirmed"], pc(rep["overview"]["bypass_rate"]), pc(rep["overview"]["filter_evasion_rate"]),
+                              rep["overview"].get("attacker_refused", 0)]])),
         ("Models, most robust first (attack success rate, 95% CI)", _table(["Model", "Attempts", "Success rate", "95% CI"], [[r["model"], r["attempts"], pc(r["asr"]), f"{pc(r['asr_ci_low'])} – {pc(r['asr_ci_high'])}"] for r in rep["leaderboard"]])),
         ("Cipher property vs bypass (Spearman)", _table(["Property", "n", "ρ", "p"], [[m["metric"], m["n"], num(m["spearman"]["rho"]) if m["spearman"] else "—", f"{m['spearman']['p']:.2g}" if m["spearman"] else "—"] for m in rep["metric_correlations"]])),
         ("Cipher × strategy", _table(["Cipher", "Strategy", "n", "Bypass rate"], [[h["cipher"], h["strategy"], h["n"], pc(h["rate"])] for h in rep["heatmap"]])),
