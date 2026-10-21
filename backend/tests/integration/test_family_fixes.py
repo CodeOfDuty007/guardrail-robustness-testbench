@@ -153,3 +153,35 @@ async def test_attacker_refusal_skips_target_and_is_excluded_from_rates(env, mon
     assert {r["family"] for r in flat_rows(Filters(run_id=rid))} == {"encoding"}
     ov = overview(Filters(run_id=rid))
     assert ov["total_attempts"] == 3 and ov["attacker_refused"] == 3
+
+
+async def test_refusals_are_never_scored_as_target_responses(env, monkeypatch):
+    """Codex stop-review #2: family AND legacy-PAIR attacker refusals get no target call and no real judgment."""
+    from sqlmodel import Session, select
+
+    from app.db.telemetry import models as m
+    from app.db.telemetry.session import get_engine
+    from app.engine import orchestrator as orch
+    refusing, target_calls, judge_calls = FakeAttacker("I'm sorry, but I can't help with that."), [], []
+
+    class CountingTarget:
+        model_name, provider_kind = "mock-guarded-1b", "mock"
+        async def send(self, system, user):
+            (judge_calls if system.startswith("You are a strict evaluator") else target_calls).append(user)
+            return TargetResult("YES")
+
+    monkeypatch.setattr(orch, "Metered", lambda inner, st, role: refusing if role == "attacker" else CountingTarget())
+    with Session(get_engine()) as s:
+        p = m.Provider(label="a", kind="mock", model_name="mock-guarded-1b"); s.add(p); s.commit(); s.refresh(p)
+        pid = p.id
+    cfg = orch.RunConfig(families=["persuasion"], strategies=["PAIR"], ciphers=["NONE"], max_iterations=2,
+                         attacker_provider_id=pid, judge_provider_id=pid)
+    rid = orch.create_run(cfg)
+    await orch.execute_run(rid, cfg)
+    assert target_calls == [] and judge_calls == []
+    with Session(get_engine()) as s:
+        atts = s.exec(select(m.Attempt).where(m.Attempt.run_id == rid)).all()
+        js = [s.exec(select(m.Judgment).where(m.Judgment.attempt_id == a.id)).one() for a in atts]
+    assert {a.strategy_name for a in atts} == {"persuasion", "PAIR"}
+    assert all(a.status == "attacker_refused" and a.generated_by == "attacker_refused" for a in atts)
+    assert all(j.score_source == "attacker_refused" and not j.filter_evaded and not j.semantic_complied for j in js)
