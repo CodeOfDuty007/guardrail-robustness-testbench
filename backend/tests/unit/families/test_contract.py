@@ -42,3 +42,41 @@ async def test_encoding_family_matches_legacy_direct_cipher_wrap_golden():
 def test_family_cells_cross_product():
     cfg = RunConfig(families=["encoding"], ciphers=["NONE", "STANDARD_BASE64"])
     assert family_cells(cfg) == [("encoding", "NONE"), ("encoding", "STANDARD_BASE64")]
+
+
+async def test_family_replay_sends_exact_stored_request():
+    import pytest
+    from app.engine.orchestrator import replay
+    from app.engine.targets.base import TargetResult
+
+    class Spy:
+        model_name, provider_kind, sent = "spy", "mock", []
+        async def send(self, system, user):
+            self.sent.append(user); return TargetResult("Okay.")
+
+    o = canary_objectives(1337)[1]
+    stored = "ATTACKER-GENERATED FRAMING\n" + o.text  # differs from plaintext on purpose
+    spec = {"seed": 1337, "objective_id": o.id, "cipher_type": "STANDARD_BASE64", "strategy_name": "encoding",
+            "plaintext_prompt": o.text, "full_request_sent": stored}
+    spy = Spy()
+    await replay(spec, spy)
+    assert spy.sent == [stored]
+    with pytest.raises(ValueError, match="full_request_sent"):
+        await replay({**spec, "full_request_sent": ""}, spy)
+
+
+async def test_replay_reapplies_simulated_family_conditions(monkeypatch):
+    """A mock success must re-verify as a success: replay sets the same sim_family the run did."""
+    from app.engine import orchestrator
+    from app.engine.targets import mock
+    seen = []
+
+    class Spy:
+        model_name, provider_kind = "spy", "mock"
+        async def send(self, system, user):
+            seen.append(mock.sim_family.get()); return orchestrator.TargetResult("Okay.")
+
+    o = canary_objectives(1337)[1]
+    await orchestrator.replay({"seed": 1337, "objective_id": o.id, "cipher_type": "NONE", "strategy_name": "encoding",
+                               "plaintext_prompt": o.text, "full_request_sent": o.text}, Spy())
+    assert seen == ["encoding"] and mock.sim_family.get() is None
