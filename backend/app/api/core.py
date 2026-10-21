@@ -20,6 +20,7 @@ from app.defenses import DEFENSE_REGISTRY
 from app.engine import pyrit_bridge
 from app.engine.converters.ciphers import CIPHER_REGISTRY
 from app.engine.orchestrator import MOCK_PROFILES, RunConfig, create_run, execute_run
+from app.engine.families import list_families
 from app.engine.strategies import STRATEGY_REGISTRY
 from app.providers.key_manager import key_manager
 from app.providers.redaction import redact
@@ -36,10 +37,16 @@ def meta():
         "ciphers": [{"name": n, "label": c.label} for n, c in CIPHER_REGISTRY.items()],
         "strategies": [{"name": n, "adaptive": s.adaptive, "pyrit_native": s.pyrit_native}
                        for n, s in STRATEGY_REGISTRY.items()],
+        "families": list_families(),
         "defenses": list(DEFENSE_REGISTRY), "datasets": list_datasets(),
         "mock_models": list(MOCK_PROFILES), "pyrit": pyrit_bridge.status(),
         "operator": settings.operator_name, "default_seed": settings.default_seed,
     }
+
+
+@router.get("/api/families")
+def families():
+    return list_families()
 
 
 # ---- providers (keys never persisted here) -----------------------------------------------------

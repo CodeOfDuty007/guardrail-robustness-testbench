@@ -26,8 +26,8 @@ METRICS = ("avalanche_score", "shannon_entropy", "diffusion_score", "confusion_c
 
 def filters(model: str | None = None, cipher: str | None = None, strategy: str | None = None,
             run_id: int | None = None, defense: str | None = None, date_from: str | None = None,
-            date_to: str | None = None) -> Filters:
-    return Filters(model, cipher, strategy, run_id, defense, date_from, date_to)
+            date_to: str | None = None, family: str | None = None, category: str | None = None) -> Filters:
+    return Filters(model, cipher, strategy, run_id, defense, date_from, date_to, family, category)
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:

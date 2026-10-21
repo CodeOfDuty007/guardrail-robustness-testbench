@@ -70,6 +70,11 @@ class Attempt(SQLModel, table=True):
     cipher_type: str
     defense_name: Optional[str] = None
     status: str = "running"  # running|success|failed|timeout
+    # Attack-family taxonomy (plan §A.4, §D). NULL on legacy strategy rows -> analytics falls back to strategy_name.
+    family: Optional[str] = Field(default=None, index=True)
+    category: Optional[str] = None   # jailbreak|injection
+    channel: Optional[str] = None    # direct|indirect
+    delivery: Optional[str] = None   # indirect injection carrier: visible|html_comment|structured_data|...
     created_at: datetime = Field(default_factory=utcnow)
 
 

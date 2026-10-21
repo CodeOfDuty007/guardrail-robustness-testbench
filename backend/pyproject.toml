@@ -23,6 +23,8 @@ dependencies = [
 [project.optional-dependencies]
 # PyRIT 1.1.0 verified against the engine in this repo
 providers = ["litellm==1.56.4"]
+rex = ["torch>=2.5"]          # Part B toy-MoE REX reproduction (CPU is enough)
+mcp = ["mcp>=1.9"]            # Part C MCP server
 dev = ["pytest==8.3.4", "pytest-asyncio==0.25.0", "ruff==0.8.4", "mypy==1.14.0"]
 
 [tool.pytest.ini_options]

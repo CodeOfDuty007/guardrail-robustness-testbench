@@ -22,10 +22,11 @@ from app.db.telemetry import models as m
 from app.db.telemetry.session import get_engine
 from app.defenses import DEFENSE_REGISTRY
 from app.engine.converters.ciphers import get_cipher
+from app.engine.families import CandidatePrompt, Turn, family_rng, get_family
 from app.engine.scorers.composite import Score, make_llamaguard, make_llm_judge, score_attempt
 from app.engine.strategies import STRATEGY_REGISTRY
 from app.engine.targets.base import LiteLLMTarget, OpenAICompatTarget, Target, TargetResult
-from app.engine.targets.mock import MockTarget
+from app.engine.targets.mock import MockTarget, sim_family
 from app.metrics.capture import MetricCapture
 from app.providers.redaction import redact
 from app.ws.hub import hub
@@ -52,6 +53,10 @@ class RunConfig(BaseModel):
     limit: int | None = None
     ciphers: list[str] = Field(default_factory=lambda: ["STANDARD_BASE64", "CUSTOM_BASE64", "AES_128_GCM"])
     strategies: list[str] = Field(default_factory=lambda: ["DirectCipherWrap"])
+    # Attack families (plan Part A/D). When set and `strategies` is not given explicitly, only families run.
+    families: list[str] = Field(default_factory=list)
+    # families (besides `encoding`, which always ciphers) to ALSO run cipher-wrapped -> compounding analysis
+    wrap_with_cipher: list[str] = Field(default_factory=list)
     defenses: list[str] = Field(default_factory=list)
     max_iterations: int = 1
     seed: int = settings.default_seed
@@ -115,10 +120,13 @@ def _emit(run_id: int, type_: str, **data: Any) -> None:
     hub.publish(run_id, {"type": type_, "run_id": run_id, "ts": datetime.now(timezone.utc).isoformat(), **data})
 
 
-def _new_attempt(st: RunState, obj: Objective, strategy: str, cipher: str, iteration: int) -> int:
+def _new_attempt(st: RunState, obj: Objective, strategy: str, cipher: str, iteration: int, *,
+                 family: str | None = None, category: str | None = None, channel: str | None = None,
+                 delivery: str | None = None) -> int:
     with Session(get_engine()) as s:
         att = m.Attempt(run_id=st.run_id, iteration=iteration, objective_id=obj.id, strategy_name=strategy,
-                        cipher_type=cipher, defense_name=",".join(st.cfg.defenses) or None)
+                        cipher_type=cipher, defense_name=",".join(st.cfg.defenses) or None,
+                        family=family, category=category, channel=channel, delivery=delivery)
         s.add(att); s.commit(); s.refresh(att)
         return att.id
 
@@ -144,9 +152,9 @@ def _build_repro_steps(cipher_name: str, seed: int, strategy: str, decode_instru
         f"1. Start with the plaintext objective: {plaintext[:200]}{'…' if len(plaintext) > 200 else ''}",
         f"2. Apply cipher '{cipher_name}' with seed {seed} to encode the plaintext.",
         f"3. Wrap the result: [CIPHER={cipher_name};SEED={seed}] <encoded>",
-        f"4. Prepend the decode instruction (if any) and any strategy prefix.",
-        f"5. Send the assembled message exactly as stored in the 'full_request_sent' column.",
-        f"6. Check the model reply for the canary string or objective satisfaction.",
+        "4. Prepend the decode instruction (if any) and any strategy prefix.",
+        "5. Send the assembled message exactly as stored in the 'full_request_sent' column.",
+        "6. Check the model reply for the canary string or objective satisfaction.",
     ]
     return "\n".join(lines)
 
@@ -229,6 +237,105 @@ async def run_attempt(st: RunState, obj: Objective, strategy_name: str, cipher_n
         raise
 
 
+def apply_cipher(cand: CandidatePrompt, cipher, cap: MetricCapture) -> CandidatePrompt:
+    """Cipher-wrap a family's framed plaintext exactly the way DirectCipherWrap does (golden-tested)."""
+    if cipher.name == "NONE":
+        return cand
+    ct = cap.record(cand.plaintext)[0]
+    instr = cipher.decode_instruction()
+    marker = f"[CIPHER={cipher.name};SEED={cipher.seed}] {ct}"
+    cand.user = f"{instr}\n{marker}".lstrip("\n") if instr else marker
+    cand.cipher, cand.ciphertext, cand.decode_instruction = cipher.name, ct, instr
+    return cand
+
+
+async def run_family_attempt(st: RunState, obj: Objective, family_name: str, cipher_name: str, iteration: int,
+                             target: Target, judge, guard, attacker: Target | None,
+                             history: list[Turn] | None = None) -> tuple[Score, str]:
+    """Native engine, single-turn attack family (plan Phase A1/A4): generate -> cipher -> defenses -> send -> score."""
+    cfg, fam = st.cfg, get_family(family_name)
+    aid = _new_attempt(st, obj, family_name, cipher_name, iteration, family=family_name, category=fam.category)
+    fsm = lambda state: _emit(st.run_id, "fsm", attempt_id=aid, state=state)  # noqa: E731
+    try:
+        fsm("GENERATE")
+        cipher = get_cipher(cipher_name, cfg.seed)
+        cap = MetricCapture(cipher)
+        cand = await fam.generate(objective=obj, attacker=attacker, history=history,
+                                  rng=family_rng(cfg.seed, family_name, obj.id, cipher_name, iteration))
+        cand = apply_cipher(cand, cipher, cap)
+        _set_attempt_shape(aid, cand)
+        fsm("MUTATE")
+        metrics = cap.last.as_dict() if cap.last else {}
+        blocked, drows = False, []
+        for dname in cfg.defenses:
+            res = DEFENSE_REGISTRY[dname].apply(cand.user)
+            drows.append(m.DefenseApplied(attempt_id=aid, defense_name=dname, blocked=res.blocked,
+                                          transformed_payload=res.transformed if res.transformed != cand.user else None))
+            blocked = blocked or res.blocked
+        fsm("DISPATCH")
+        status = None
+        if blocked:
+            result = TargetResult("[blocked by defense layer] I'm sorry, request blocked.")
+        else:
+            token = sim_family.set(family_name)
+            try:
+                result = await _dispatch(target, obj, cand)
+            except (asyncio.TimeoutError, TimeoutError):
+                result, status = TargetResult("[timeout]"), "timeout"
+            finally:
+                sim_family.reset(token)
+        result.text = redact(result.text)
+        fsm("EVALUATE")
+        score = await score_attempt(objective_text=obj.text, response=result.text, canary_regex=obj.canary_regex,
+                                    judge=judge, judge_model=getattr(judge, "model", "regex-only") if judge else "regex-only",
+                                    guard=guard)
+        fsm("PERSIST")
+        _persist(st, aid, strategy=family_name, cipher_name=cipher.name, plaintext=cand.plaintext,
+                 ciphertext=cand.ciphertext, instr=cand.decode_instruction, cipher=cipher, metrics=metrics,
+                 result=result, score=score, target_model=target.model_name, blocked=blocked, status=status,
+                 iteration=iteration, obj=obj, defenses=drows, full_request_sent=cand.user)
+        fsm("ADAPT" if not score.confirmed else "DONE")
+        return score, result.text
+    except BaseException:
+        _drop_attempt(aid)
+        raise
+
+
+async def _dispatch(target: Target, obj: Objective, cand: CandidatePrompt) -> TargetResult:
+    """Direct families send the user turn. Indirect-injection families carry a `document` that only an
+    agentic target (ToolAgentTarget, Phase A5) can ingest via `send_document`."""
+    if cand.document is None:
+        return await target.send(obj.system_prompt, cand.user)
+    send_document = getattr(target, "send_document", None)
+    if send_document is None:
+        raise ValueError(f"family {cand.family!r} is indirect injection and needs an agentic target")
+    return await send_document(obj.system_prompt, cand.user, cand.document)
+
+
+def _set_attempt_shape(aid: int, cand: CandidatePrompt) -> None:
+    with Session(get_engine()) as s:
+        if (a := s.get(m.Attempt, aid)):
+            a.channel, a.delivery = cand.channel, cand.delivery
+            s.add(a); s.commit()
+
+
+def family_cells(cfg: RunConfig) -> list[tuple[str, str]]:
+    """(family, cipher) cross-product (plan §A.3): ciphered families x run ciphers; the rest run bare.
+    A family listed in `wrap_with_cipher` runs bare AND ciphered so analytics can measure compounding."""
+    cells: list[tuple[str, str]] = []
+    for name in cfg.families:
+        fam = get_family(name)
+        if fam.kind != "single":
+            continue  # meta-families (Phase A2) are scheduled by their own runner
+        if fam.wrap_with_cipher:
+            cells += [(name, c) for c in cfg.ciphers]
+        else:
+            cells.append((name, "NONE"))
+            if name in cfg.wrap_with_cipher:
+                cells += [(name, c) for c in cfg.ciphers if c != "NONE"]
+    return cells
+
+
 async def run_attempt_pyrit(st: RunState, obj: Objective, strategy_name: str, cipher_name: str, target: Target,
                             attacker: Target | None, judge, guard) -> Score:
     """PyRIT engine: PyRIT's own attack executor drives the (multi-turn) conversation."""
@@ -281,6 +388,11 @@ async def execute_run(run_id: int, cfg: RunConfig) -> None:
             bad = [x for x in cfg.strategies if x not in PYRIT_STRATEGIES]
             if bad:
                 raise ValueError(f"strategies not available on pyrit engine: {bad}")
+            if cfg.families:
+                raise ValueError("attack families run on the native engine")
+        for name in cfg.families:
+            get_family(name)  # fail fast on unknown names
+        strategies = cfg.strategies if (not cfg.families or "strategies" in cfg.model_fields_set) else []
         with Session(get_engine()) as s:
             def prov(pid): return s.get(m.Provider, pid) if pid else None
             def role(pid, name):
@@ -326,7 +438,17 @@ async def execute_run(run_id: int, cfg: RunConfig) -> None:
             except _BudgetHalt:
                 return
 
-        tasks = [asyncio.create_task(one(o, s_, c)) for o in objs for s_ in cfg.strategies for c in cfg.ciphers]
+        async def one_family(obj: Objective, fam: str, ciph: str) -> None:
+            try:
+                if st.over_budget():
+                    st.stop = True
+                    return
+                await run_family_attempt(st, obj, fam, ciph, 0, target, judge, guard, att_t)
+            except _BudgetHalt:
+                return
+
+        tasks = [asyncio.create_task(one(o, s_, c)) for o in objs for s_ in strategies for c in cfg.ciphers]
+        tasks += [asyncio.create_task(one_family(o, f_, c)) for o in objs for f_, c in family_cells(cfg)]
         try:
             await asyncio.gather(*tasks)
         except BaseException:
