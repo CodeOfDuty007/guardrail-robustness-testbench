@@ -100,8 +100,8 @@ class MockTarget:
         title = re.search(r"Title:\s*([^\n]+)", text)
         topic = title.group(1).strip() if title else "general matters"
         low = system.lower()
-        if "translat" in low:
-            return f"Traduction : {topic} (document traduit)."
+        if "sentiment" in low:
+            return "neutral"
         if "classif" in low:
             return "Topic: community"
         return f"Summary: The document is a short note about {topic.lower()}."

@@ -2,7 +2,7 @@
 
 Prompt injection is not jailbreaking: the question is whether instructions embedded in UNTRUSTED
 CONTENT override the developer's instructions (OWASP LLM01). On the direct sub-axis that content
-arrives inside the user turn: the developer's app asks the model to summarise / translate / classify
+arrives inside the user turn: the developer's app asks the model to summarise / label / classify
 a user-supplied document, and the document carries a hidden instruction.
 
 Every family builds the same shape and differs only in how the hidden instruction is phrased:
