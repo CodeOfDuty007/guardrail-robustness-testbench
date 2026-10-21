@@ -22,7 +22,18 @@ REFUSAL = "I'm sorry, but I can't help with that request."
 # family attempt so the mock can model "this guardrail is thin against framing X". These numbers are
 # invented to exercise the Robustness Profile pipeline and mean nothing about real models.
 # Families add their own entry here (0.0 = no lift, guard_strength is reduced by this amount).
-SIM_FAMILY_BOOST: dict[str, float] = {"encoding": 0.0}
+SIM_FAMILY_BOOST: dict[str, float] = {
+    "encoding": 0.0,
+    # S1-A1 single-turn jailbreak families — simulation only (invented, NOT measured on any model)
+    "low_resource_lang": 0.05,     # simulation only
+    "many_shot": 0.10,             # simulation only
+    "refusal_suppression": 0.15,   # simulation only
+    "payload_splitting": 0.20,     # simulation only
+    "authority_context": 0.25,     # simulation only
+    "hypothetical_framing": 0.28,  # simulation only
+    "persuasion": 0.30,            # simulation only
+    "roleplay_persona": 0.35,      # simulation only
+}
 sim_family: contextvars.ContextVar[str | None] = contextvars.ContextVar("sim_family", default=None)
 
 
