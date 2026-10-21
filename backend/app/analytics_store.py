@@ -65,9 +65,14 @@ class Filters:
     date_to: str | None = None
     family: str | None = None
     category: str | None = None
+    # Attempts where the ATTACKER model refused never reached the target; counting them would inflate
+    # robustness. Excluded unless explicitly requested (overview reports their count separately).
+    include_attacker_refused: bool = False
 
     def where(self) -> tuple[str, list]:
         c, a = [], []
+        if not self.include_attacker_refused:
+            c.append("COALESCE(generated_by, '') <> 'attacker_refused'")
         for col, v in (("target_model", self.model), ("cipher_type", self.cipher), ("strategy_name", self.strategy),
                        ("run_id", self.run_id), ("defense", self.defense), ("family", self.family),
                        ("category", self.category)):

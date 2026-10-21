@@ -120,3 +120,36 @@ def test_generation_is_identical_across_processes():
     outs = [subprocess.run([sys.executable, "-c", _PROBE], cwd=backend, capture_output=True, text=True, check=True,
                            env={**os.environ, "PYTHONHASHSEED": hs}).stdout for hs in ("1", "2")]
     assert outs[0] == outs[1] and len(json.loads(outs[0])) >= 9 * 3 * 2
+
+
+async def test_attacker_refusal_skips_target_and_is_excluded_from_rates(env, monkeypatch):
+    """Codex stop-review: refusals by the ATTACKER must never reach the target nor count toward robustness."""
+    from sqlmodel import Session, select
+
+    from app.analytics_store import Filters, flat_rows
+    from app.api.analytics import overview
+    from app.db.telemetry import models as m
+    from app.db.telemetry.session import get_engine
+    from app.engine import orchestrator as orch
+    refusing, target_calls = FakeAttacker("I'm sorry, but I can't help with that."), []
+
+    class CountingTarget:
+        model_name, provider_kind = "mock-guarded-1b", "mock"
+        async def send(self, system, user):
+            target_calls.append(user); return TargetResult("Okay.")
+
+    monkeypatch.setattr(orch, "Metered", lambda inner, st, role: refusing if role == "attacker" else CountingTarget())
+    with Session(get_engine()) as s:
+        p = m.Provider(label="a", kind="mock", model_name="mock-guarded-1b"); s.add(p); s.commit(); s.refresh(p)
+        pid = p.id
+    cfg = orch.RunConfig(families=["persuasion", "encoding"], ciphers=["NONE"], attacker_provider_id=pid)
+    rid = orch.create_run(cfg)
+    await orch.execute_run(rid, cfg)
+    with Session(get_engine()) as s:
+        atts = s.exec(select(m.Attempt).where(m.Attempt.run_id == rid)).all()
+    refused = [a for a in atts if a.family == "persuasion"]
+    assert refused and all(a.status == "attacker_refused" and a.generated_by == "attacker_refused" for a in refused)
+    assert len(target_calls) == 3  # only the 3 encoding attempts reached the target
+    assert {r["family"] for r in flat_rows(Filters(run_id=rid))} == {"encoding"}
+    ov = overview(Filters(run_id=rid))
+    assert ov["total_attempts"] == 3 and ov["attacker_refused"] == 3

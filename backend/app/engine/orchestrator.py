@@ -289,7 +289,11 @@ async def run_family_attempt(st: RunState, obj: Objective, family_name: str, cip
             blocked = blocked or res.blocked
         fsm("DISPATCH")
         status = None
-        if blocked:
+        if cand.meta.get("generated_by") == "attacker_refused":
+            # No attack text exists, so nothing is sent: the TARGET was never tested. Recorded with its own
+            # status and excluded from every bypass/robustness rate (analytics_store.Filters).
+            result, status = TargetResult("[attacker refused to generate attack text; target not called]"), "attacker_refused"
+        elif blocked:
             result = TargetResult("[blocked by defense layer] I'm sorry, request blocked.")
         else:
             token = sim_family.set(family_name)
