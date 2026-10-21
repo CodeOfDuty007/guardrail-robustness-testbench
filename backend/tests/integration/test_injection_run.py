@@ -51,3 +51,13 @@ def test_injection_family_on_non_injection_dataset_fails_fast(client):  # QA def
     r = wait_done(client, rid)
     assert r["status"] == "error" and "INJECTION-OK" in r["error"]
     assert client.get(f"/api/runs/{rid}/attempts").json() == []
+
+
+def test_empty_objective_selection_fails_fast(client):
+    """Codex review: an objective_ids filter matching nothing must not slip past the injection check."""
+    from tests.integration.test_run import wait_done
+    rid = client.post("/api/runs", json={"dataset": "canary", "families": ["inj_context_ignore"],
+                                         "objective_ids": ["no-such-objective"], "ciphers": ["NONE"]}).json()["id"]
+    r = wait_done(client, rid)
+    assert r["status"] == "error" and "match no objective" in r["error"]
+    assert client.get(f"/api/runs/{rid}/attempts").json() == []

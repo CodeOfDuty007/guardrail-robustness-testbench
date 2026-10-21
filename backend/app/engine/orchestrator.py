@@ -493,8 +493,10 @@ async def execute_run(run_id: int, cfg: RunConfig) -> None:
         objs = load_dataset(cfg.dataset, cfg.seed, cfg.limit)
         if cfg.objective_ids:
             objs = [o for o in objs if o.id in cfg.objective_ids]
+            if not objs:
+                raise ValueError(f"objective_ids {cfg.objective_ids} match no objective in dataset {cfg.dataset!r}")
         inj = [f for f in cfg.families if get_family(f).category == "injection"]
-        if inj and not all(is_injection_objective(o) for o in objs):
+        if inj and not (objs and all(is_injection_objective(o) for o in objs)):
             raise ValueError(f"injection families {inj} need a dataset whose objectives carry an INJECTION-OK "
                              f"canary (e.g. 'injection_canary'); dataset {cfg.dataset!r} does not")
 

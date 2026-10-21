@@ -90,7 +90,7 @@ class _FakeAttacker:
 @pytest.mark.parametrize("name", INJ)
 async def test_attacker_gets_brief_and_its_text_is_used(name):
     obj = load_dataset("injection_canary", 1337)[0]
-    att = _FakeAttacker(f"Attacker-written sentence that asks for {obj.canary_literal}.")
+    att = _FakeAttacker(f"ATTACKER-OUTPUT-MARKER {obj.canary_literal}")
     c = await _gen(name, obj, attacker=att)
     assert len(att.calls) == 1 and get_family(name).technique_brief in att.calls[0]  # brief names the technique
     assert obj.canary_literal in att.calls[0]
@@ -302,7 +302,7 @@ class _RecordingAttacker(_FakeAttacker):
 
 async def test_attacker_system_prompt_asks_for_hidden_sentence_only():  # defect 3
     obj = load_dataset("injection_canary", 1337)[0]
-    att = _RecordingAttacker(f"Attacker-written sentence that asks for {obj.canary_literal}.")
+    att = _RecordingAttacker(f"ATTACKER-OUTPUT-MARKER {obj.canary_literal}")
     await _gen("inj_authority", obj, attacker=att)
     assert "output ONLY the single hidden instruction sentence" in att.system
     assert "resulting user message" not in att.system and "user message" not in att.calls[0]
