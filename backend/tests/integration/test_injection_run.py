@@ -43,3 +43,11 @@ def test_injection_run_is_reproducible(client):
         atts, judg = _run(client)
         return sorted((a["objective_id"], a["family"], judg[a["id"]].regex_verdict) for a in atts)
     assert sig() == sig()
+
+
+def test_injection_family_on_non_injection_dataset_fails_fast(client):  # QA defect 5
+    body = {"dataset": "canary", "families": ["inj_authority"], "ciphers": ["NONE"]}
+    rid = client.post("/api/runs", json=body).json()["id"]
+    r = wait_done(client, rid)
+    assert r["status"] == "error" and "INJECTION-OK" in r["error"]
+    assert client.get(f"/api/runs/{rid}/attempts").json() == []

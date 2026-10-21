@@ -100,6 +100,8 @@ class MockTarget:
         title = re.search(r"Title:\s*([^\n]+)", text)
         topic = title.group(1).strip() if title else "general matters"
         low = system.lower()
+        if "title" in low:
+            return topic
         if "sentiment" in low:
             return "neutral"
         if "classif" in low:
