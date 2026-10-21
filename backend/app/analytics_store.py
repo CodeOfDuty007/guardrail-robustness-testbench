@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
 import re
 import threading
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ SELECT a.id AS attempt_id, a.run_id, a.iteration, a.objective_id, a.strategy_nam
        COALESCE(a.defense_name, 'none') AS defense, a.status, a.created_at,
        COALESCE(a.family, a.strategy_name) AS family, COALESCE(a.category, 'jailbreak') AS category,
        COALESCE(a.channel, 'direct') AS channel, a.delivery, a.technique, a.generated_by,
+       a.family AS family_raw,
        r.target_model, r.latency_ms, r.cost_usd, r.prompt_tokens, r.completion_tokens,
        p.plaintext_size_bytes, p.ciphertext_size_bytes, p.encryption_time_ms, p.decryption_time_ms,
        p.avalanche_score, p.confusion_chi2, p.diffusion_score, p.shannon_entropy,
@@ -41,7 +43,7 @@ _TYPES = {"attempt_id": "BIGINT", "run_id": "BIGINT", "iteration": "INTEGER", "c
           "filter_evaded": "BOOLEAN", "semantic_complied": "BOOLEAN", "bypass": "BOOLEAN",
           "regex_verdict": "BOOLEAN", "judge_lm_verdict": "BOOLEAN", "llamaguard_verdict": "BOOLEAN"}
 _TEXT = {"objective_id", "strategy_name", "cipher_type", "defense", "status", "target_model", "score_source",
-         "family", "category", "channel", "delivery", "technique", "generated_by",
+         "family", "category", "channel", "delivery", "technique", "generated_by", "family_raw",
          "owasp_tag", "atlas_tag", "dataset_name", "run_name"}
 _BOOLS = ("filter_evaded", "semantic_complied", "bypass", "regex_verdict", "judge_lm_verdict", "llamaguard_verdict")
 # aggregate over columns that can change in place; compared on the SAME id set in source and replica
@@ -52,6 +54,20 @@ _AGG_SRC = ("SELECT COUNT(*), COALESCE(SUM(j.filter_evaded*1000003 + j.semantic_
 _AGG_REP = ("SELECT COUNT(*), COALESCE(SUM(CAST(filter_evaded AS INT)*1000003 + CAST(semantic_complied AS INT)),0), "
             "COALESCE(SUM(cost_usd),0), COALESCE(SUM(LENGTH(COALESCE(owasp_tag,''))+LENGTH(COALESCE(atlas_tag,''))+LENGTH(run_name)),0) "
             "FROM flat WHERE attempt_id <= ?")
+# Attempt attributes that are written AFTER the row is first visible (family shape, refusal marker) or can be
+# edited in place. Compared value-by-value (digest over the replica's id set), so same-length edits such as
+# generated_by 'attacker' -> 'fallback' are caught too. COALESCEs mirror _FLAT_SQL.
+_ATTR_SRC = ("SELECT a.id, a.family, COALESCE(a.category, 'jailbreak'), COALESCE(a.channel, 'direct'), a.delivery, "
+             "a.generated_by, a.technique, a.cipher_type FROM attempts a WHERE a.id <= :mx")
+_ATTR_REP = ("SELECT attempt_id, family_raw, category, channel, delivery, generated_by, technique, cipher_type "
+             "FROM flat WHERE attempt_id <= ?")
+
+
+def _digest(rows, ids: set) -> str:
+    h = hashlib.sha256()
+    for r in sorted((tuple(r) for r in rows if r[0] in ids), key=lambda r: r[0]):
+        h.update(repr(r).encode())
+    return h.hexdigest()
 
 
 @dataclass
@@ -123,8 +139,11 @@ def _refresh(force: bool = False) -> duckdb.DuckDBPyConnection:
         src = tuple(c.execute(text(_AGG_SRC), {"mx": mx}).one())
         done = {r[0] for r in c.execute(text("SELECT a.id FROM attempts a JOIN payloads p ON p.attempt_id=a.id "
                                              "JOIN responses r ON r.attempt_id=a.id JOIN judgments j ON j.attempt_id=a.id")).all()}
+        src_attr = _digest(c.execute(text(_ATTR_SRC), {"mx": mx}).all(), have)
     rep = tuple(_con.execute(_AGG_REP, [mx]).fetchone())
-    if not have <= done or tuple(round(float(x), 9) for x in src) != tuple(round(float(x), 9) for x in rep):
+    rep_attr = _digest(_con.execute(_ATTR_REP, [mx]).fetchall(), have)
+    if (not have <= done or src_attr != rep_attr
+            or tuple(round(float(x), 9) for x in src) != tuple(round(float(x), 9) for x in rep)):
         _con = _full_rebuild()  # rows were edited or deleted in place
         return _con
     new = sorted(done - have)  # ids can finish out of order, so diff the sets rather than using max(id)
@@ -158,8 +177,11 @@ def query(sql: str, params: list | None = None) -> list[dict]:
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-def flat_rows(f: Filters, columns: str = "*", extra: str = "") -> list[dict]:
+def flat_rows(f: Filters, columns: str = "*", extra: str = "", cond: str = "") -> list[dict]:
+    """`cond` is an extra SQL predicate ANDed onto the filter set (e.g. "family_raw IS NOT NULL")."""
     w, a = f.where()
+    if cond:
+        w = f"{w} AND ({cond})" if w else f" WHERE ({cond})"
     return query(f"SELECT {columns} FROM flat{w} {extra}", a)
 
 

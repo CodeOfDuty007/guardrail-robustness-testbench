@@ -1,13 +1,14 @@
 import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Bar, BarChart, CartesianGrid, Cell, ErrorBar, Legend, Line, LineChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis, ZAxis } from 'recharts'
+import { Bar, BarChart, CartesianGrid, Cell, ErrorBar, Legend, Line, LineChart, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis, ZAxis } from 'recharts'
 import { AX, COLORS, ChartCard, DataDetails, TIP, colorOf, heat, pctTick, type Status } from '../components/charts'
 import { cipherName } from '../lib/format'
+import { compoundingBars, pivotHeatmap, radarData, rateLabel, type CompoundingFamily, type HeatmapResp, type RadarResp } from '../lib/profile'
 import { Btn, Card, State, pct } from '../components/ui'
 import { useGet } from '../hooks/useApi'
 
 type F = Record<string, string>
-const TABS = [['crypto', 'Crypto → bypass'], ['cost', 'Cost & scaling'], ['models', 'Models & defenses'], ['matrix', 'Strategy × cipher'], ['rigor', 'Rigor & standards']] as const
+const TABS = [['profile', 'Robustness Profile'], ['crypto', 'Crypto → bypass'], ['cost', 'Cost & scaling'], ['models', 'Models & defenses'], ['matrix', 'Strategy × cipher'], ['rigor', 'Rigor & standards']] as const
 
 function qs(f: F, extra: F = {}) {
   const p = new URLSearchParams()
@@ -18,7 +19,7 @@ function qs(f: F, extra: F = {}) {
 
 export default function Analytics() {
   const [sp, setSp] = useSearchParams()
-  const tab = (TABS.find(([k]) => k === sp.get('tab'))?.[0] ?? 'crypto') as (typeof TABS)[number][0]
+  const tab = (TABS.find(([k]) => k === sp.get('tab'))?.[0] ?? 'profile') as (typeof TABS)[number][0]
   const setTab = (k: string) => setSp({ tab: k })
   const [f, setF] = useState<F>({})
   const opts = useGet('/api/analytics/filters')
@@ -48,6 +49,7 @@ export default function Analytics() {
       <div className="row" role="tablist" style={{ marginBottom: 16 }}>
         {TABS.map(([k, label]) => <button key={k} role="tab" aria-selected={tab === k} className={`btn ${tab === k ? '' : 'ghost'}`} onClick={() => setTab(k)}>{label}</button>)}
       </div>
+      {tab === 'profile' && <ProfileTab f={f} />}
       {tab === 'crypto' && <CryptoTab f={f} />}
       {tab === 'cost' && <CostTab f={f} />}
       {tab === 'models' && <ModelsTab f={f} />}
@@ -62,17 +64,19 @@ const P = (x: number | null | undefined) => (x == null ? null : `${(x * 100).toF
 
 function CryptoTab({ f }: { f: F }) {
   const [metric, setMetric] = useState('avalanche_score')
-  const c = useGet(`/api/analytics/correlation${qs(f, { metric })}`, [metric, JSON.stringify(f)])
+  const [scope, setScope] = useState('all')
+  const c = useGet(`/api/analytics/correlation${qs(f, { metric, scope: scope === 'all' ? '' : scope })}`, [metric, scope, JSON.stringify(f)])
+  const scopeSel = <label style={{ margin: 0 }}>Attempts<select value={scope} onChange={(e) => setScope(e.target.value)}><option value="all">all</option><option value="encoding_family">encoding family only</option></select></label>
   const mt = useGet<any[]>(`/api/analytics/metric-table${qs(f)}`, [JSON.stringify(f)])
   const d = c.data
   const ciphers: string[] = d ? [...new Set<string>(d.by_cipher.map((x: any) => x.cipher))] : []
   return (
     <State loading={c.loading && !d} error={c.error}>
-      {d && d.n === 0 && <Card title="No data for this metric / filter"><label style={{ margin: 0 }}>X axis<select value={metric} onChange={(e) => setMetric(e.target.value)}>{['avalanche_score', 'shannon_entropy', 'diffusion_score', 'confusion_chi2'].map((m) => <option key={m}>{m}</option>)}</select></label><p className="muted mono">Pick another metric or reset the filters.</p></Card>}
+      {d && d.n === 0 && <Card title="No data for this metric / filter"><label style={{ margin: 0 }}>X axis<select value={metric} onChange={(e) => setMetric(e.target.value)}>{['avalanche_score', 'shannon_entropy', 'diffusion_score', 'confusion_chi2'].map((m) => <option key={m}>{m}</option>)}</select></label>{scopeSel}<p className="muted mono">Pick another metric or reset the filters.</p></Card>}
       {d && d.n > 0 && (<>
         <Card trim title="Headline: crypto property vs bypass rate">
           <div className="row" style={{ marginBottom: 12 }}>
-            <label style={{ margin: 0 }}>X axis<select value={metric} onChange={(e) => setMetric(e.target.value)}>{['avalanche_score', 'shannon_entropy', 'diffusion_score', 'confusion_chi2'].map((m) => <option key={m}>{m}</option>)}</select></label>
+            <label style={{ margin: 0 }}>X axis<select value={metric} onChange={(e) => setMetric(e.target.value)}>{['avalanche_score', 'shannon_entropy', 'diffusion_score', 'confusion_chi2'].map((m) => <option key={m}>{m}</option>)}</select></label>{scopeSel}
             <div className="mono">n={d.n} · Spearman ρ = <b className="kpi" style={{ fontSize: 28 }}>{d.spearman ? d.spearman.rho.toFixed(3) : 'n/a'}</b>{d.spearman && <span className="muted"> (p={d.spearman.p.toExponential(1)})</span>}{d.logistic && <span className="muted"> · logit slope {d.logistic.coef.toExponential(2)}</span>}</div>
           </div>
           <div style={{ height: 340 }} role="img" aria-label={`Bypass rate by cipher against ${metric} with fitted logistic curve`}>
@@ -91,7 +95,7 @@ function CryptoTab({ f }: { f: F }) {
             <Bar dataKey="bypass_rate" isAnimationActive={false}>{d.by_cipher.map((x: any) => <Cell key={x.cipher} fill={colorOf(ciphers, x.cipher)} />)}<ErrorBar dataKey="err" stroke="#fff" /></Bar>
           </BarChart></ResponsiveContainer>
         </ChartCard>
-        <Card title="All four crypto metrics vs bypass">
+        <Card title="All four crypto metrics vs bypass (all attempts)">
           <State loading={mt.loading && !mt.data} error={mt.error}>
             <table><thead><tr><th>Metric</th><th>n</th><th>Spearman ρ</th><th>p</th><th>Logit slope</th></tr></thead>
               <tbody>{mt.data?.map((m) => <tr key={m.metric}><td>{m.metric}</td><td>{m.n}</td><td>{m.spearman ? m.spearman.rho.toFixed(3) : '—'}</td><td>{m.spearman ? m.spearman.p.toExponential(1) : '—'}</td><td>{m.logistic ? m.logistic.coef.toExponential(2) : '—'}</td></tr>)}</tbody></table>
@@ -221,6 +225,86 @@ function RigorTab({ f }: { f: F }) {
           <table><thead><tr><th>OWASP</th><th>ATLAS</th><th>Attempts</th><th>Bypass rate (95% range)</th></tr></thead><tbody>{std.data?.map((r, i) => <tr key={i}><td>{r.owasp}</td><td>{r.atlas}</td><td>{r.attempts}</td><td>{pct(r.bypass_rate)} [{pct(r.ci_low)} – {pct(r.ci_high)}]</td></tr>)}</tbody></table>
         </State>
       </Card>
+    </>
+  )
+}
+
+function ProfileTab({ f }: { f: F }) {
+  const k = [JSON.stringify(f)]
+  const hm = useGet<HeatmapResp>(`/api/analytics/family-heatmap${qs(f)}`, k)
+  const rd = useGet<RadarResp>(`/api/analytics/family-radar${qs(f)}`, k)
+  const cp = useGet<{ families: CompoundingFamily[]; scope: any; attacker_refused: number }>(`/api/analytics/compounding${qs(f)}`, k)
+  const ib = useGet<any>(`/api/analytics/injection-breakdown${qs(f)}`, k)
+  const grid = pivotHeatmap(hm.data)
+  const radar = radarData(rd.data)
+  const comp = compoundingBars(cp.data?.families)
+  const refusedTxt = (n: number | undefined) => (n ? ` ${n} attacker-refused attempt${n === 1 ? '' : 's'} excluded from these rates.` : '')
+  const refusedNote = refusedTxt(hm.data?.attacker_refused)
+  const withErr = (rows: any[]) => rows.map((x) => ({ ...x, err: [x.rate - x.ci_low, x.ci_high - x.rate] }))
+  const P2 = (x: any) => `${P(x.rate)} [${P(x.ci_low)} – ${P(x.ci_high)}]`
+  const pctFmt = (v: any) => (typeof v === 'number' ? pct(v) : v)
+  return (
+    <>
+      <section className="card" aria-labelledby="rp-heat">
+        <h3 id="rp-heat">Robustness Profile: bypass rate per attack family and model</h3>
+        {hm.error ? <p className="bad" role="alert">Could not load this chart: {hm.error}</p>
+          : hm.loading && !hm.data ? <p className="muted" role="status">Loading…</p>
+          : !grid.rows.length ? <p className="muted">No attack-family attempts for the current filters. Start a run with one or more attack families in New Run (older strategy-only runs are not part of the profile).</p>
+          : (<>
+            <div className="tablewrap"><table aria-label="Heatmap of bypass rate by attack family (rows) and target model (columns), with 95% confidence intervals">
+              <thead><tr><th scope="col">family \ model</th><th scope="col">category</th>{grid.models.map((m) => <th key={m} scope="col">{m}</th>)}</tr></thead>
+              <tbody>{grid.rows.map(({ meta, cells }) => (
+                <tr key={meta.family}>
+                  <th scope="row" title={meta.citation ?? undefined} style={{ textAlign: 'left' }}>{meta.family}
+                    <div className="muted mono" style={{ fontSize: 11, fontWeight: 400 }}>{[meta.channels.join('/'), meta.atlas_parent && (meta.atlas_tag !== meta.atlas_parent ? `${meta.atlas_parent} (${meta.atlas_tag})` : meta.atlas_parent)].filter(Boolean).join(' · ')}</div></th>
+                  <td className="mono">{meta.category ?? '—'}</td>
+                  {cells.map((c, i) => <td key={grid.models[i]} title={c ? rateLabel(c) : 'not tested'} aria-label={`${meta.family} on ${grid.models[i]}: ${c ? rateLabel(c) : 'not tested'}`}
+                    style={{ background: c ? heat(c.rate) : 'transparent', color: c ? '#fff' : 'var(--muted)', textAlign: 'center', fontFamily: 'var(--pixel)', fontSize: 22 }}>
+                    {c ? pct(c.rate) : '—'}<div style={{ fontSize: 11, fontFamily: 'var(--mono)' }}>{c ? `n=${c.n} · ${pct(c.ci_low)}–${pct(c.ci_high)}` : 'not tested'}</div></td>)}
+                </tr>))}</tbody></table></div>
+            <p className="muted mono" style={{ fontSize: 13 }}>Bypass = got past the filter AND did what was asked. Green = robust, red = often bypassed; the small range is the 95% confidence interval. Hover a family for its source paper.{refusedNote}</p>
+            <DataDetails caption="Robustness Profile" table={{ headers: ['Family', 'Category', 'ATLAS', 'Model', 'Bypass rate', 'Low', 'High', 'Attempts'], rows: grid.rows.flatMap(({ meta: m, cells }) => cells.flatMap((c, i) => (c ? [[m.family, m.category, m.atlas_tag, grid.models[i], P(c.rate), P(c.ci_low), P(c.ci_high), c.n]] : []))) }} />          </>)}
+      </section>
+      <ChartCard title="Family radar: one shape per model" height={360} status={st(rd, !radar.rows.length)} label={`Radar chart of bypass rate per attack family, one shape per model: ${radar.series.map((s) => s.model).join(', ')}`}
+        note={([radar.series.length === 1 ? 'Run the same families on a second model to compare shapes.' : null,
+          radar.excluded.length ? `Left off because not every model was tested on them: ${radar.excluded.join(', ')}.` : null,
+          radar.axes.length > 0 && radar.axes.length < 3 ? 'A radar needs at least three shared families to form a shape; the heatmap above has every number.' : null].filter(Boolean).join(' ') || 'Further from the centre = bypassed more often.') + refusedTxt(rd.data?.attacker_refused)}
+        table={{ headers: ['Family', ...radar.series.map((s) => s.model)], rows: radar.rows.map((r) => [String(r.family), ...radar.series.map((s) => P(r[s.key] as number))]) }}>
+        <ResponsiveContainer><RadarChart data={radar.rows} outerRadius="72%">
+          <PolarGrid stroke="var(--border)" /><PolarAngleAxis dataKey="family" tick={{ fontFamily: 'JetBrains Mono', fontSize: 11, fill: 'var(--muted)' }} />
+          <PolarRadiusAxis domain={[0, 1]} tickFormatter={pctTick} angle={90} {...AX} />
+          {radar.series.map((s, i) => <Radar key={s.key} name={s.model} dataKey={s.key} stroke={COLORS[i % COLORS.length]} fill={COLORS[i % COLORS.length]} fillOpacity={0.18} strokeWidth={2} isAnimationActive={false} />)}
+          <Legend /><Tooltip {...TIP} formatter={pctFmt} />
+        </RadarChart></ResponsiveContainer>
+      </ChartCard>
+      <ChartCard title="Does a cipher add lift on top of the framing? Family alone vs family + cipher" height={300} status={st(cp, !comp.bars.length)} label="Grouped bar chart of bypass rate per family, alone versus cipher-wrapped, with 95% confidence intervals"
+        note={[`Compared only on matching cells: same model, dataset, objective and defense, within the same run and try, so both bars share one framing. The change is the average of per-cell changes (each cell counts once); its 95% range comes from resampling cells.${cp.data?.scope?.cipher_filter_ignored ? ' Your cipher filter is ignored here.' : ''}${refusedTxt(cp.data?.attacker_refused)}`,
+          comp.unmatched.length ? `Not comparable: ${comp.unmatched.map((u) => `${u.family} (${u.note})`).join('; ')}.` : null,
+          cp.data && !comp.bars.length ? 'To fill this in, add a family to "wrap with cipher" in New Run and include the NONE cipher.' : null].filter(Boolean).join(' ')}
+        table={{ headers: ['Family', 'Alone', 'With cipher', 'Change (pp, mean per cell)', '95% range (pp)', 'Matched cells', 'Attempts (alone / cipher)'], rows: comp.bars.map((b) => [b.family, P(b.bare), P(b.ciphered), b.delta == null ? null : +(b.delta * 100).toFixed(1), b.ciText, b.cells, `${b.bareN} / ${b.ciphN}`]) }}>
+        <ResponsiveContainer><BarChart data={comp.bars}><CartesianGrid stroke="var(--border)" /><XAxis dataKey="family" {...AX} /><YAxis domain={[0, 1]} tickFormatter={pctTick} {...AX} /><Tooltip {...TIP} formatter={pctFmt} /><Legend />
+          <Bar dataKey="bare" name="family alone" fill={COLORS[1]} isAnimationActive={false}><ErrorBar dataKey="bareErr" stroke="#fff" /></Bar>
+          <Bar dataKey="ciphered" name="family + cipher" fill={COLORS[0]} isAnimationActive={false}><ErrorBar dataKey="ciphErr" stroke="#fff" /></Bar>
+        </BarChart></ResponsiveContainer>
+      </ChartCard>
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(min(380px,100%),1fr))' }}>
+        <ChartCard title="Prompt injection: direct vs indirect" height={240} status={st(ib, !ib.data?.by_channel?.length)} label="Bar chart of prompt-injection bypass rate for direct and indirect injection, with 95% confidence intervals"
+          note={(ib.data && !ib.data.has_indirect ? 'No indirect-injection data yet (it needs an agentic target), so only direct injection is shown.' : 'Indirect = the instruction arrives inside a document or tool output, not the user turn.') + refusedTxt(ib.data?.attacker_refused)}
+          table={{ headers: ['Channel', 'Bypass rate (95% CI)', 'Attempts', 'Families'], rows: (ib.data?.by_channel ?? []).map((x: any) => [x.channel, P2(x), x.n, x.families.join(', ')]) }}>
+          <ResponsiveContainer><BarChart data={withErr(ib.data?.by_channel ?? [])}><CartesianGrid stroke="var(--border)" /><XAxis dataKey="channel" {...AX} /><YAxis domain={[0, 1]} tickFormatter={pctTick} {...AX} /><Tooltip {...TIP} formatter={pctFmt} />
+            <Bar dataKey="rate" name="bypass rate" isAnimationActive={false}>{(ib.data?.by_channel ?? []).map((x: any, i: number) => <Cell key={x.channel} fill={COLORS[(i + 2) % COLORS.length]} />)}<ErrorBar dataKey="err" stroke="#fff" /></Bar></BarChart></ResponsiveContainer>
+        </ChartCard>
+        <ChartCard title="Does hiding the instruction help? Indirect injection by delivery method" height={240} status={st(ib, !ib.data?.by_delivery?.length)} label="Bar chart of indirect prompt-injection bypass rate per delivery method, with 95% confidence intervals"
+          note={ib.data && !ib.data.has_indirect ? (ib.data.note ?? 'No indirect-injection data yet.') : '"visible" is the plain-text control; the other methods hide the instruction from a human reader.' + refusedTxt(ib.data?.attacker_refused)}
+          table={{ headers: ['Delivery', 'Bypass rate (95% CI)', 'Attempts', 'Per model'], rows: (ib.data?.by_delivery ?? []).map((x: any) => [x.delivery, P2(x), x.n, x.per_model.map((m: any) => `${m.model}: ${P(m.rate)} (n=${m.n})`).join('; ')]) }}>
+          <ResponsiveContainer><BarChart data={withErr(ib.data?.by_delivery ?? [])}><CartesianGrid stroke="var(--border)" /><XAxis dataKey="delivery" {...AX} /><YAxis domain={[0, 1]} tickFormatter={pctTick} {...AX} /><Tooltip {...TIP} formatter={pctFmt} />
+            <Bar dataKey="rate" name="bypass rate" fill={COLORS[4]} isAnimationActive={false}><ErrorBar dataKey="err" stroke="#fff" /></Bar></BarChart></ResponsiveContainer>
+        </ChartCard>
+      </div>
+      {!!hm.data?.families.length && <Card title="Families and their sources">
+        <div className="tablewrap"><table><thead><tr><th>Family</th><th>Category</th><th>OWASP</th><th>ATLAS technique (sub-id)</th><th>Source</th></tr></thead>
+          <tbody>{hm.data.families.map((m) => <tr key={m.family}><td>{m.family}</td><td>{m.category ?? '—'}</td><td>{m.owasp_tag ?? '—'}</td><td>{m.atlas_parent ?? '—'}{m.atlas_tag && m.atlas_tag !== m.atlas_parent ? <span className="muted"> ({m.atlas_tag})</span> : null}</td><td className="muted">{m.citation ?? '—'}</td></tr>)}</tbody></table></div>
+      </Card>}
     </>
   )
 }

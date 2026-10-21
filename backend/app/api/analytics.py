@@ -4,6 +4,7 @@ Every endpoint takes the same filter set (model, cipher, strategy, run, defense,
 """
 from __future__ import annotations
 
+import functools
 import html
 import json
 import math
@@ -22,6 +23,7 @@ from app.db.telemetry.session import get_engine
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 METRICS = ("avalanche_score", "shannon_entropy", "diffusion_score", "confusion_chi2")
+CORR_SCOPES = {"all": "", "encoding_family": "family_raw = 'encoding'"}
 
 
 def filters(model: str | None = None, cipher: str | None = None, strategy: str | None = None,
@@ -113,12 +115,19 @@ def overview(f: Filters = Depends(filters)):
 
 
 @router.get("/correlation")
-def correlation(metric: str = Query("avalanche_score"), f: Filters = Depends(filters)):
-    """Headline plot: crypto metric vs bypass. Points + per-cipher aggregates + logistic fit + Spearman."""
+def correlation(metric: str = Query("avalanche_score"), scope: str = Query("all"), f: Filters = Depends(filters)):
+    """Headline plot: crypto metric vs bypass. Points + per-cipher aggregates + logistic fit + Spearman.
+
+    scope=all (default, unchanged) uses every attempt; scope=encoding_family restricts to attempts of the
+    `encoding` attack family only (plan §A.5), so framing families don't contaminate the correlation."""
     if metric not in METRICS:
         return {"error": f"metric must be one of {METRICS}"}
-    rows = [r for r in flat_rows(f) if r[metric] is not None]
+    if scope not in CORR_SCOPES:
+        return {"error": f"scope must be one of {tuple(CORR_SCOPES)}"}
+    rows = [r for r in flat_rows(f, cond=CORR_SCOPES[scope]) if r[metric] is not None]
     out = _corr(rows, metric) | {"points": [], "by_cipher": [], "curve": []}
+    if scope != "all":
+        out["scope"] = scope
     if not rows:
         return out
     agg: dict[str, list[dict]] = defaultdict(list)
@@ -290,6 +299,189 @@ def timeline(f: Filters = Depends(filters)):
             for k, v in sorted(by.items())]
 
 
+# ---------------------------------------------------------------------------------------------------------
+# Robustness Profile (plan §A.5 + §D.5). Built ONLY from attempts with a real family (`a.family IS NOT NULL`);
+# legacy strategy rows (DirectCipherWrap, PAIR, ...) never appear. Attacker-refused attempts stay out of every
+# rate (Filters.where) and are counted separately in `attacker_refused`.
+# ---------------------------------------------------------------------------------------------------------
+FAMILY_ONLY = "family_raw IS NOT NULL"
+_PROFILE_COLS = ("family_raw, category, channel, delivery, cipher_type, target_model, dataset_name, objective_id, "
+                 "defense, run_id, iteration, bypass")
+
+
+def atlas_parent(tag: str | None) -> str | None:
+    """Parent ATLAS technique id: `AML.T0051.001` -> `AML.T0051` (sub-technique suffix dropped)."""
+    if not tag:
+        return None
+    parts = tag.split(".")
+    return ".".join(parts[:2]) if len(parts) >= 2 else tag
+
+
+@functools.lru_cache(maxsize=1)
+def _family_meta() -> dict[str, dict]:
+    from app.engine.families import list_families
+    return {f["name"]: f for f in list_families()}
+
+
+def _meta(name: str) -> dict:
+    """Registry metadata; tolerant of family names written by stories not loaded here."""
+    m = _family_meta().get(name) or {}
+    return {"citation": m.get("citation"), "owasp_tag": m.get("owasp_tag"), "atlas_tag": m.get("atlas_tag"),
+            "atlas_parent": atlas_parent(m.get("atlas_tag")), "registry_category": m.get("category"),
+            "registry_channel": m.get("channel")}
+
+
+def _profile_rows(f: Filters, cond: str = "") -> list[dict]:
+    return flat_rows(f, _PROFILE_COLS, cond=FAMILY_ONLY + (f" AND ({cond})" if cond else ""))
+
+
+def _refused(f: Filters, cond: str = "") -> int:
+    """Attacker-refused family attempts matching the same filters (excluded from every rate)."""
+    c = FAMILY_ONLY + " AND generated_by = 'attacker_refused'" + (f" AND ({cond})" if cond else "")
+    return len(flat_rows(Filters(**{**f.__dict__, "include_attacker_refused": True}), "attempt_id", cond=c))
+
+
+def _mode(vals: list) -> str | None:
+    vals = [v for v in vals if v]
+    return max(sorted(set(vals)), key=vals.count) if vals else None
+
+
+BOOT_RESAMPLES = 2000
+BOOT_SEED = 0
+
+
+def cell_bootstrap(deltas: list[float]) -> dict:
+    """Mean per-cell delta with a cluster (cell-level) percentile bootstrap 95% interval.
+
+    Deterministic (fixed seed). With fewer than 2 cells there is no interval: CI is null with a note, never a
+    zero-width range."""
+    if not deltas:
+        return {"delta": None, "delta_ci_low": None, "delta_ci_high": None, "delta_note": "no matched cells"}
+    d = np.asarray(deltas, float)
+    if len(d) < 2:
+        return {"delta": float(d.mean()), "delta_ci_low": None, "delta_ci_high": None,
+                "delta_note": "only 1 matched cell: no confidence interval"}
+    rng = np.random.default_rng(BOOT_SEED)
+    means = d[rng.integers(0, len(d), size=(BOOT_RESAMPLES, len(d)))].mean(axis=1)
+    lo, hi = np.percentile(means, [2.5, 97.5])
+    return {"delta": float(d.mean()), "delta_ci_low": float(lo), "delta_ci_high": float(hi), "delta_note": None}
+
+
+def matched_delta(cells: dict, pick) -> dict:
+    """Compare a cipher arm (`pick(arms)` -> that cell's ciphered rows) with the bare arm (cipher NONE) on cells
+    that have BOTH. The delta is computed WITHIN each cell and averaged with equal weight per cell, so unequal
+    attempt counts across cells can't manufacture a difference. Per-arm rates (Wilson CIs) pool the matched rows."""
+    deltas: list[float] = []
+    arm: list[dict] = []
+    base: list[dict] = []
+    for arms in cells.values():
+        ca, ba = pick(arms), arms.get("NONE") or []
+        if ca and ba:
+            deltas.append(_rate(ca)["rate"] - _rate(ba)["rate"])
+            arm += ca; base += ba
+    return {"matched_cells": len(deltas), "n_cells": len(deltas), "ciphered": _rate(arm), "bare": _rate(base),
+            **cell_bootstrap(deltas)}
+
+
+@router.get("/family-heatmap")
+def family_heatmap(f: Filters = Depends(filters)):
+    """Rows = attack families, columns = target models, cell = bypass rate (filter_evaded AND semantic_complied)
+    with a 95% Wilson CI and n. Per-family category/channel/tags/citation; ATLAS rolled up by parent technique."""
+    rows = _profile_rows(f)
+    by_fam: dict[str, list[dict]] = defaultdict(list)
+    cells: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for r in rows:
+        by_fam[r["family_raw"]].append(r)
+        cells[(r["family_raw"], r["target_model"])].append(r)
+    fams = []
+    for name in sorted(by_fam, key=lambda n: (_mode([r["category"] for r in by_fam[n]]) or "", n)):
+        v, m = by_fam[name], _meta(name)
+        fams.append({"family": name, "category": _mode([r["category"] for r in v]) or m["registry_category"],
+                     "channel": _mode([r["channel"] for r in v]) or m["registry_channel"],
+                     "channels": sorted({r["channel"] for r in v if r["channel"]}),
+                     **{k: m[k] for k in ("citation", "owasp_tag", "atlas_tag", "atlas_parent")}, **_rate(v)})
+    by_atlas: dict[str, list[dict]] = defaultdict(list)
+    tags: dict[str, set] = defaultdict(set)
+    for fam in fams:
+        key = fam["atlas_parent"] or "untagged"
+        by_atlas[key] += by_fam[fam["family"]]
+        if fam["atlas_tag"]:
+            tags[key].add(fam["atlas_tag"])
+    atlas = [{"atlas": k, "sub_ids": sorted(tags[k]),
+              "families": [x["family"] for x in fams if (x["atlas_parent"] or "untagged") == k], **_rate(v)}
+             for k, v in sorted(by_atlas.items())]
+    return {"models": sorted({r["target_model"] for r in rows}), "families": fams, "by_atlas": atlas,
+            "attacker_refused": _refused(f),
+            "cells": [{"family": fa, "model": mo, **_rate(v)} for (fa, mo), v in sorted(cells.items())]}
+
+
+@router.get("/family-radar")
+def family_radar(f: Filters = Depends(filters)):
+    """One polygon per model over the family axes. A model with no attempts on a family has no entry for it
+    (never a fabricated 0)."""
+    rows = _profile_rows(f)
+    per: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        per[r["target_model"]][r["family_raw"]].append(r)
+    return {"families": sorted({r["family_raw"] for r in rows}), "attacker_refused": _refused(f),
+            "models": [{"model": mo, "families": {fa: _rate(v) for fa, v in sorted(fv.items())}}
+                       for mo, fv in sorted(per.items())]}
+
+
+@router.get("/compounding")
+def compounding(f: Filters = Depends(filters)):
+    """Per family: bare (cipher NONE) vs family + cipher, compared ONLY on matched cells
+    (model x dataset x objective x defense x run x iteration) present in both arms. Within one run the orchestrator
+    generates ONE candidate per (objective, family, iteration) and cipher-wraps it per cell, so keying on run and
+    iteration means both arms share the same framing. Delta = mean of per-cell deltas, cell-bootstrap 95% CI."""
+    f2 = Filters(**{**f.__dict__, "cipher": None})  # both arms are needed, so a cipher filter can't apply
+    rows = _profile_rows(f2)
+    cells: dict[str, dict[tuple, dict[str, list[dict]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for r in rows:
+        key = (r["target_model"], r["dataset_name"], r["objective_id"], r["defense"], r["run_id"], r["iteration"])
+        cells[r["family_raw"]][key][r["cipher_type"]].append(r)
+    scope = {"comparison": "matched cells (model, dataset, objective, defense, run, iteration)",
+             "delta": "mean of per-cell deltas (equal weight per cell)",
+             "delta_ci": f"cell-level percentile bootstrap, {BOOT_RESAMPLES} resamples, seed {BOOT_SEED}",
+             "cipher_filter_ignored": bool(f.cipher),
+             "filters_applied": {k: v for k, v in f2.__dict__.items() if v not in (None, "", False)}}
+    out = []
+    for fam in sorted(cells):
+        fc = cells[fam]
+        ciphers = sorted({c for arms in fc.values() for c in arms} - {"NONE"})
+        per_cipher = [{"cipher": c, **matched_delta(fc, lambda arms, c=c: arms.get(c) or [])} for c in ciphers]
+        pooled = matched_delta(fc, lambda arms: [r for c, v in arms.items() if c != "NONE" for r in v])
+        note = (None if pooled["n_cells"] else "never run with a cipher; add it to wrap_with_cipher" if not ciphers
+                else "never run bare (cipher NONE) in the same run and iteration; include NONE in the run ciphers")
+        cats = [r["category"] for arms in fc.values() for v in arms.values() for r in v]
+        out.append({"family": fam, "category": _mode(cats), **pooled, "by_cipher": per_cipher, "note": note})
+    return {"families": out, "scope": scope, "attacker_refused": _refused(f2)}
+
+
+@router.get("/injection-breakdown")
+def injection_breakdown(f: Filters = Depends(filters)):
+    """Injection families only (§D.5): direct vs indirect split, and bypass rate by delivery carrier over
+    indirect attempts only (direct injection has no carrier). Both are also split per model."""
+    cond = "category = 'injection'"
+    rows = _profile_rows(f, cond)
+    ind = [r for r in rows if r["channel"] == "indirect"]
+
+    def group(rs: list[dict], key: str) -> list[dict]:
+        by: dict[str, list[dict]] = defaultdict(list)
+        bym: dict[tuple, list[dict]] = defaultdict(list)
+        for r in rs:
+            by[r[key] or "unspecified"].append(r)
+            bym[(r[key] or "unspecified", r["target_model"])].append(r)
+        return [{key: k, "families": sorted({r["family_raw"] for r in v}), **_rate(v),
+                 "per_model": [{"model": m, **_rate(x)} for (kk, m), x in sorted(bym.items()) if kk == k]}
+                for k, v in sorted(by.items())]
+
+    return {"by_channel": group(rows, "channel"), "by_delivery": group(ind, "delivery"),
+            "has_direct": any(r["channel"] == "direct" for r in rows), "has_indirect": bool(ind),
+            "models": sorted({r["target_model"] for r in rows}), "attacker_refused": _refused(f, cond),
+            "note": None if ind else "No indirect-injection attempts yet. Run an indirect family against an agentic target."}
+
+
 def build_report(f: Filters) -> dict:
     """Guardrail Robustness Report: aggregates only — no prompts, payloads or raw responses.
 
@@ -310,8 +502,36 @@ def build_report(f: Filters) -> dict:
             "overview": overview(f), "leaderboard": leaderboard(f), "heatmap": heatmap(f),
             "metric_correlations": metric_table(f), "pareto": pareto(f), "scaling_fits": sc["fits"],
             "defense_ablation": defense_ablation(f), "model_size": model_size(f), "standards": standards(f),
-            "judge_agreement": judge_agreement(f),
+            "judge_agreement": judge_agreement(f), "robustness_profile": family_heatmap(f),
         }
+
+
+def _profile_html(prof: dict) -> str:
+    """Family x model table (rate, 95% CI, n) with a numbered citation footnote per family."""
+    e = html.escape
+    pc = lambda x: f"{x * 100:.1f}%"  # noqa: E731
+    if not prof["families"]:
+        return "<p>No attack-family attempts match these filters (legacy strategy runs are not part of the profile).</p>"
+    cells = {(c["family"], c["model"]): c for c in prof["cells"]}
+    notes = {f["family"]: i + 1 for i, f in enumerate(x for x in prof["families"] if x["citation"])}
+    th = "".join(f"<th>{e(h)}</th>" for h in ["Family", "Category", "Channel", "ATLAS", *prof["models"]])
+    trs = []
+    for fam in prof["families"]:
+        ref = f"<sup>[{notes[fam['family']]}]</sup>" if fam["family"] in notes else ""
+        atlas = e(fam["atlas_parent"] or "—") + (f" <small>({e(fam['atlas_tag'])})</small>"
+                                                  if fam["atlas_tag"] and fam["atlas_tag"] != fam["atlas_parent"] else "")
+        tds = []
+        for mo in prof["models"]:
+            c = cells.get((fam["family"], mo))
+            tds.append("<td>—</td>" if c is None else
+                       f"<td>{pc(c['rate'])} [{pc(c['ci_low'])} – {pc(c['ci_high'])}] n={c['n']}</td>")
+        trs.append(f"<tr><td>{e(fam['family'])}{ref}</td><td>{e(fam['category'] or '—')}</td>"
+                   f"<td>{e(', '.join(fam['channels']) or '—')}</td><td>{atlas}</td>{''.join(tds)}</tr>")
+    foot = "".join(f"<li value={i}>{e(name)}: {e(next(x['citation'] for x in prof['families'] if x['family'] == name))}</li>"
+                   for name, i in notes.items())
+    return (f"<p>Bypass rate (filter evaded AND complied) per attack family and target model, with 95% Wilson interval "
+            f"and attempts. Attacker-refused attempts excluded: {prof['attacker_refused']}.</p>"
+            f"<table><tr>{th}</tr>{''.join(trs)}</table><ol class=refs>{foot}</ol>")
 
 
 def _table(headers: list[str], rows: list[list]) -> str:
@@ -334,6 +554,7 @@ def report(format: str = "json", f: Filters = Depends(filters)):
         ("Overview", _table(["Attempts", "Confirmed bypasses", "Bypass rate", "Passed the filter", "Attacker refused (excluded)"],
                             [[rep["overview"]["total_attempts"], rep["overview"]["confirmed"], pc(rep["overview"]["bypass_rate"]), pc(rep["overview"]["filter_evasion_rate"]),
                               rep["overview"].get("attacker_refused", 0)]])),
+        ("Robustness Profile: attack family × model (bypass rate, 95% CI)", _profile_html(rep["robustness_profile"])),
         ("Models, most robust first (attack success rate, 95% CI)", _table(["Model", "Attempts", "Success rate", "95% CI"], [[r["model"], r["attempts"], pc(r["asr"]), f"{pc(r['asr_ci_low'])} – {pc(r['asr_ci_high'])}"] for r in rep["leaderboard"]])),
         ("Cipher property vs bypass (Spearman)", _table(["Property", "n", "ρ", "p"], [[m["metric"], m["n"], num(m["spearman"]["rho"]) if m["spearman"] else "—", f"{m['spearman']['p']:.2g}" if m["spearman"] else "—"] for m in rep["metric_correlations"]])),
         ("Cipher × strategy", _table(["Cipher", "Strategy", "n", "Bypass rate"], [[h["cipher"], h["strategy"], h["n"], pc(h["rate"])] for h in rep["heatmap"]])),
