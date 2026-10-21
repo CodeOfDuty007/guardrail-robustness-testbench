@@ -20,7 +20,7 @@ _FLAT_SQL = """
 SELECT a.id AS attempt_id, a.run_id, a.iteration, a.objective_id, a.strategy_name, a.cipher_type,
        COALESCE(a.defense_name, 'none') AS defense, a.status, a.created_at,
        COALESCE(a.family, a.strategy_name) AS family, COALESCE(a.category, 'jailbreak') AS category,
-       COALESCE(a.channel, 'direct') AS channel, a.delivery,
+       COALESCE(a.channel, 'direct') AS channel, a.delivery, a.technique, a.generated_by,
        r.target_model, r.latency_ms, r.cost_usd, r.prompt_tokens, r.completion_tokens,
        p.plaintext_size_bytes, p.ciphertext_size_bytes, p.encryption_time_ms, p.decryption_time_ms,
        p.avalanche_score, p.confusion_chi2, p.diffusion_score, p.shannon_entropy,
@@ -41,7 +41,7 @@ _TYPES = {"attempt_id": "BIGINT", "run_id": "BIGINT", "iteration": "INTEGER", "c
           "filter_evaded": "BOOLEAN", "semantic_complied": "BOOLEAN", "bypass": "BOOLEAN",
           "regex_verdict": "BOOLEAN", "judge_lm_verdict": "BOOLEAN", "llamaguard_verdict": "BOOLEAN"}
 _TEXT = {"objective_id", "strategy_name", "cipher_type", "defense", "status", "target_model", "score_source",
-         "family", "category", "channel", "delivery",
+         "family", "category", "channel", "delivery", "technique", "generated_by",
          "owasp_tag", "atlas_tag", "dataset_name", "run_name"}
 _BOOLS = ("filter_evaded", "semantic_complied", "bypass", "regex_verdict", "judge_lm_verdict", "llamaguard_verdict")
 # aggregate over columns that can change in place; compared on the SAME id set in source and replica

@@ -75,6 +75,8 @@ class Attempt(SQLModel, table=True):
     category: Optional[str] = None   # jailbreak|injection
     channel: Optional[str] = None    # direct|indirect
     delivery: Optional[str] = None   # indirect injection carrier: visible|html_comment|structured_data|...
+    technique: Optional[str] = None  # family sub-technique, e.g. a PAP technique name / language / shot count
+    generated_by: Optional[str] = None  # attacker|fallback|attacker_refused (who wrote the attack text)
     created_at: datetime = Field(default_factory=utcnow)
 
 

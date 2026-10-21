@@ -9,22 +9,8 @@ from __future__ import annotations
 import random
 
 from app.datasets.loaders import Objective
-from app.engine.families.base import CandidatePrompt, Category, Kind, Turn, ask_attacker
-from app.engine.targets.base import Target, TargetResult
-
-
-class _Recorder:
-    """Wraps the attacker so we can tell a real (non-empty) attacker reply from the fallback."""
-
-    def __init__(self, inner: Target) -> None:
-        self.inner, self.model_name = inner, getattr(inner, "model_name", "attacker")
-        self.provider_kind: str = getattr(inner, "provider_kind", "")
-        self.raw: str | None = None
-
-    async def send(self, system: str, user: str) -> TargetResult:
-        r = await self.inner.send(system, user)
-        self.raw = r.text
-        return r
+from app.engine.families.base import CandidatePrompt, Category, Kind, Turn, ask_attacker_ex
+from app.engine.targets.base import Target
 
 
 class BriefFamily:
@@ -50,10 +36,6 @@ class BriefFamily:
                        history: list[Turn] | None, rng: random.Random) -> CandidatePrompt:
         technique = self.pick_technique(rng)
         brief = self.brief_for(technique)
-        rec = _Recorder(attacker) if attacker is not None else None
-        text = await ask_attacker(rec, brief, objective, objective.text, history)
-        by = "attacker" if rec is not None and (rec.raw or "").strip() else "fallback"
-        if by == "fallback":
-            text = objective.text
+        text, by = await ask_attacker_ex(attacker, brief, objective, objective.text, history)
         return CandidatePrompt(user=text, plaintext=text, family=self.name, technique=technique,
                                meta={"generated_by": by, "technique_brief": brief})
