@@ -52,7 +52,7 @@ export function compoundingBars(fams: CompoundingFamily[] | null | undefined) {
   return {
     bars: list.filter((f) => f.matched_cells > 0).map((f) => ({
       family: f.family, bare: f.bare.rate, ciphered: f.ciphered.rate, bareErr: err(f.bare), ciphErr: err(f.ciphered),
-      bareN: f.bare.n, ciphN: f.ciphered.n, delta: f.delta, cells: f.matched_cells,
+      bareN: f.bare.n, ciphN: f.ciphered.n, delta: f.delta, deltaLo: f.delta_ci_low, deltaHi: f.delta_ci_high, cells: f.matched_cells,
     })),
     unmatched: list.filter((f) => f.matched_cells === 0).map((f) => ({ family: f.family, note: f.note ?? 'no matched cells' })),
   }

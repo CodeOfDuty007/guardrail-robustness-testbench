@@ -49,11 +49,11 @@ describe('compoundingBars', () => {
   it('plots matched families with CI error bars and lists the rest with their reason', () => {
     const fam = (family: string, cells: number, note: string | null): CompoundingFamily => ({
       family, category: 'jailbreak', matched_cells: cells, bare: R(1, 10), ciphered: R(5, 10), delta: cells ? 0.4 : null,
-      delta_ci_low: null, delta_ci_high: null, note, by_cipher: [],
+      delta_ci_low: cells ? 0.05 : null, delta_ci_high: cells ? 0.75 : null, note, by_cipher: [],
     })
     const { bars, unmatched } = compoundingBars([fam('persuasion', 6, null), fam('roleplay_persona', 0, 'never run with a cipher')])
     expect(bars).toHaveLength(1)
-    expect(bars[0]).toMatchObject({ family: 'persuasion', bare: 0.1, ciphered: 0.5, bareN: 10, cells: 6 })
+    expect(bars[0]).toMatchObject({ family: 'persuasion', bare: 0.1, ciphered: 0.5, bareN: 10, cells: 6, delta: 0.4, deltaLo: 0.05, deltaHi: 0.75 })
     expect(bars[0].bareErr[0]).toBeCloseTo(0.1)
     expect(bars[0].ciphErr[1]).toBeCloseTo(0.1)
     expect(unmatched).toEqual([{ family: 'roleplay_persona', note: 'never run with a cipher' }])

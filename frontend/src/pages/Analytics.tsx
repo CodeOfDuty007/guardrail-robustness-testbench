@@ -95,7 +95,7 @@ function CryptoTab({ f }: { f: F }) {
             <Bar dataKey="bypass_rate" isAnimationActive={false}>{d.by_cipher.map((x: any) => <Cell key={x.cipher} fill={colorOf(ciphers, x.cipher)} />)}<ErrorBar dataKey="err" stroke="#fff" /></Bar>
           </BarChart></ResponsiveContainer>
         </ChartCard>
-        <Card title="All four crypto metrics vs bypass">
+        <Card title="All four crypto metrics vs bypass (all attempts)">
           <State loading={mt.loading && !mt.data} error={mt.error}>
             <table><thead><tr><th>Metric</th><th>n</th><th>Spearman ρ</th><th>p</th><th>Logit slope</th></tr></thead>
               <tbody>{mt.data?.map((m) => <tr key={m.metric}><td>{m.metric}</td><td>{m.n}</td><td>{m.spearman ? m.spearman.rho.toFixed(3) : '—'}</td><td>{m.spearman ? m.spearman.p.toExponential(1) : '—'}</td><td>{m.logistic ? m.logistic.coef.toExponential(2) : '—'}</td></tr>)}</tbody></table>
@@ -238,8 +238,8 @@ function ProfileTab({ f }: { f: F }) {
   const grid = pivotHeatmap(hm.data)
   const radar = radarData(rd.data)
   const comp = compoundingBars(cp.data?.families)
-  const refused = hm.data?.attacker_refused ?? 0
-  const refusedNote = refused ? ` ${refused} attacker-refused attempt${refused === 1 ? '' : 's'} excluded from every rate.` : ''
+  const refusedTxt = (n: number | undefined) => (n ? ` ${n} attacker-refused attempt${n === 1 ? '' : 's'} excluded from these rates.` : '')
+  const refusedNote = refusedTxt(hm.data?.attacker_refused)
   const withErr = (rows: any[]) => rows.map((x) => ({ ...x, err: [x.rate - x.ci_low, x.ci_high - x.rate] }))
   const P2 = (x: any) => `${P(x.rate)} [${P(x.ci_low)} – ${P(x.ci_high)}]`
   const pctFmt = (v: any) => (typeof v === 'number' ? pct(v) : v)
@@ -263,13 +263,12 @@ function ProfileTab({ f }: { f: F }) {
                     {c ? pct(c.rate) : '—'}<div style={{ fontSize: 11, fontFamily: 'var(--mono)' }}>{c ? `n=${c.n} · ${pct(c.ci_low)}–${pct(c.ci_high)}` : 'not tested'}</div></td>)}
                 </tr>))}</tbody></table></div>
             <p className="muted mono" style={{ fontSize: 13 }}>Bypass = got past the filter AND did what was asked. Green = robust, red = often bypassed; the small range is the 95% confidence interval. Hover a family for its source paper.{refusedNote}</p>
-            <DataDetails caption="Robustness Profile" table={{ headers: ['Family', 'Category', 'ATLAS', 'Model', 'Bypass rate', 'Low', 'High', 'Attempts'], rows: (hm.data?.cells ?? []).map((c) => { const m = hm.data?.families.find((x) => x.family === c.family); return [c.family, m?.category ?? null, m?.atlas_tag ?? null, c.model, P(c.rate), P(c.ci_low), P(c.ci_high), c.n] }) }} />
-          </>)}
+            <DataDetails caption="Robustness Profile" table={{ headers: ['Family', 'Category', 'ATLAS', 'Model', 'Bypass rate', 'Low', 'High', 'Attempts'], rows: grid.rows.flatMap(({ meta: m, cells }) => cells.flatMap((c, i) => (c ? [[m.family, m.category, m.atlas_tag, grid.models[i], P(c.rate), P(c.ci_low), P(c.ci_high), c.n]] : []))) }} />          </>)}
       </section>
       <ChartCard title="Family radar: one shape per model" height={360} status={st(rd, !radar.rows.length)} label={`Radar chart of bypass rate per attack family, one shape per model: ${radar.series.map((s) => s.model).join(', ')}`}
-        note={[radar.series.length === 1 ? 'Run the same families on a second model to compare shapes.' : null,
+        note={([radar.series.length === 1 ? 'Run the same families on a second model to compare shapes.' : null,
           radar.excluded.length ? `Left off because not every model was tested on them: ${radar.excluded.join(', ')}.` : null,
-          radar.axes.length > 0 && radar.axes.length < 3 ? 'A radar needs at least three shared families to form a shape; the heatmap above has every number.' : null].filter(Boolean).join(' ') || 'Further from the centre = bypassed more often.'}
+          radar.axes.length > 0 && radar.axes.length < 3 ? 'A radar needs at least three shared families to form a shape; the heatmap above has every number.' : null].filter(Boolean).join(' ') || 'Further from the centre = bypassed more often.') + refusedTxt(rd.data?.attacker_refused)}
         table={{ headers: ['Family', ...radar.series.map((s) => s.model)], rows: radar.rows.map((r) => [String(r.family), ...radar.series.map((s) => P(r[s.key] as number))]) }}>
         <ResponsiveContainer><RadarChart data={radar.rows} outerRadius="72%">
           <PolarGrid stroke="var(--border)" /><PolarAngleAxis dataKey="family" tick={{ fontFamily: 'JetBrains Mono', fontSize: 11, fill: 'var(--muted)' }} />
@@ -279,10 +278,10 @@ function ProfileTab({ f }: { f: F }) {
         </RadarChart></ResponsiveContainer>
       </ChartCard>
       <ChartCard title="Does a cipher add lift on top of the framing? Family alone vs family + cipher" height={300} status={st(cp, !comp.bars.length)} label="Grouped bar chart of bypass rate per family, alone versus cipher-wrapped, with 95% confidence intervals"
-        note={[`Compared only on matching cells (same model, dataset, objective and defense).${cp.data?.scope?.cipher_filter_ignored ? ' Your cipher filter is ignored here.' : ''}`,
+        note={[`Compared only on matching cells (same model, dataset, objective and defense).${cp.data?.scope?.cipher_filter_ignored ? ' Your cipher filter is ignored here.' : ''}${refusedTxt(cp.data?.attacker_refused)}`,
           comp.unmatched.length ? `Not comparable: ${comp.unmatched.map((u) => `${u.family} (${u.note})`).join('; ')}.` : null,
           cp.data && !comp.bars.length ? 'To fill this in, add a family to "wrap with cipher" in New Run and include the NONE cipher.' : null].filter(Boolean).join(' ')}
-        table={{ headers: ['Family', 'Alone', 'With cipher', 'Change (pp)', 'Cells', 'Attempts (alone / cipher)'], rows: comp.bars.map((b) => [b.family, P(b.bare), P(b.ciphered), b.delta == null ? null : +(b.delta * 100).toFixed(1), b.cells, `${b.bareN} / ${b.ciphN}`]) }}>
+        table={{ headers: ['Family', 'Alone', 'With cipher', 'Change (pp)', '95% range (pp)', 'Cells', 'Attempts (alone / cipher)'], rows: comp.bars.map((b) => [b.family, P(b.bare), P(b.ciphered), b.delta == null ? null : +(b.delta * 100).toFixed(1), b.deltaLo == null || b.deltaHi == null ? null : `${(b.deltaLo * 100).toFixed(1)} to ${(b.deltaHi * 100).toFixed(1)}`, b.cells, `${b.bareN} / ${b.ciphN}`]) }}>
         <ResponsiveContainer><BarChart data={comp.bars}><CartesianGrid stroke="var(--border)" /><XAxis dataKey="family" {...AX} /><YAxis domain={[0, 1]} tickFormatter={pctTick} {...AX} /><Tooltip {...TIP} formatter={pctFmt} /><Legend />
           <Bar dataKey="bare" name="family alone" fill={COLORS[1]} isAnimationActive={false}><ErrorBar dataKey="bareErr" stroke="#fff" /></Bar>
           <Bar dataKey="ciphered" name="family + cipher" fill={COLORS[0]} isAnimationActive={false}><ErrorBar dataKey="ciphErr" stroke="#fff" /></Bar>
@@ -290,13 +289,13 @@ function ProfileTab({ f }: { f: F }) {
       </ChartCard>
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(min(380px,100%),1fr))' }}>
         <ChartCard title="Prompt injection: direct vs indirect" height={240} status={st(ib, !ib.data?.by_channel?.length)} label="Bar chart of prompt-injection bypass rate for direct and indirect injection, with 95% confidence intervals"
-          note={ib.data && !ib.data.has_indirect ? 'No indirect-injection data yet (it needs an agentic target), so only direct injection is shown.' : 'Indirect = the instruction arrives inside a document or tool output, not the user turn.'}
+          note={(ib.data && !ib.data.has_indirect ? 'No indirect-injection data yet (it needs an agentic target), so only direct injection is shown.' : 'Indirect = the instruction arrives inside a document or tool output, not the user turn.') + refusedTxt(ib.data?.attacker_refused)}
           table={{ headers: ['Channel', 'Bypass rate (95% CI)', 'Attempts', 'Families'], rows: (ib.data?.by_channel ?? []).map((x: any) => [x.channel, P2(x), x.n, x.families.join(', ')]) }}>
           <ResponsiveContainer><BarChart data={withErr(ib.data?.by_channel ?? [])}><CartesianGrid stroke="var(--border)" /><XAxis dataKey="channel" {...AX} /><YAxis domain={[0, 1]} tickFormatter={pctTick} {...AX} /><Tooltip {...TIP} formatter={pctFmt} />
             <Bar dataKey="rate" name="bypass rate" isAnimationActive={false}>{(ib.data?.by_channel ?? []).map((x: any, i: number) => <Cell key={x.channel} fill={COLORS[(i + 2) % COLORS.length]} />)}<ErrorBar dataKey="err" stroke="#fff" /></Bar></BarChart></ResponsiveContainer>
         </ChartCard>
         <ChartCard title="Does hiding the instruction help? Indirect injection by delivery method" height={240} status={st(ib, !ib.data?.by_delivery?.length)} label="Bar chart of indirect prompt-injection bypass rate per delivery method, with 95% confidence intervals"
-          note={ib.data && !ib.data.has_indirect ? (ib.data.note ?? 'No indirect-injection data yet.') : '"visible" is the plain-text control; the other methods hide the instruction from a human reader.'}
+          note={ib.data && !ib.data.has_indirect ? (ib.data.note ?? 'No indirect-injection data yet.') : '"visible" is the plain-text control; the other methods hide the instruction from a human reader.' + refusedTxt(ib.data?.attacker_refused)}
           table={{ headers: ['Delivery', 'Bypass rate (95% CI)', 'Attempts', 'Per model'], rows: (ib.data?.by_delivery ?? []).map((x: any) => [x.delivery, P2(x), x.n, x.per_model.map((m: any) => `${m.model}: ${P(m.rate)} (n=${m.n})`).join('; ')]) }}>
           <ResponsiveContainer><BarChart data={withErr(ib.data?.by_delivery ?? [])}><CartesianGrid stroke="var(--border)" /><XAxis dataKey="delivery" {...AX} /><YAxis domain={[0, 1]} tickFormatter={pctTick} {...AX} /><Tooltip {...TIP} formatter={pctFmt} />
             <Bar dataKey="rate" name="bypass rate" fill={COLORS[4]} isAnimationActive={false}><ErrorBar dataKey="err" stroke="#fff" /></Bar></BarChart></ResponsiveContainer>
