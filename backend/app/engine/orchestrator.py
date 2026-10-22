@@ -440,7 +440,7 @@ async def run_attempt_pyrit(st: RunState, obj: Objective, strategy_name: str, ci
         max_turns = max(1, cfg.max_iterations)
         # Per-strategy max serial call count.  PyRIT retries malformed attacker JSON up to
         # _PYRIT_ATTACKER_RETRIES times, so each "attacker call" can consume that many timeouts.
-        _PYRIT_ATTACKER_RETRIES = 10  # matches PyRIT's RETRY_MAX_NUM_ATTEMPTS default (OpenAICompatTarget.retries=5 + PyRIT own)
+        _PYRIT_ATTACKER_RETRIES = 10  # matches PyRIT's RETRY_MAX_NUM_ATTEMPTS default (malformed-JSON retries)
         att_factor = _PYRIT_ATTACKER_RETRIES + 1  # retries + the successful call
         if strategy_name == "Crescendo":
             # max_turns turns × (backtracks+1) attempts each; per attempt: att_factor attacker + 1 target
@@ -451,7 +451,12 @@ async def run_attempt_pyrit(st: RunState, obj: Objective, strategy_name: str, ci
             max_calls = eff_width * eff_branching * max_turns * (att_factor + 1)
         else:
             max_calls = 1
-        timeout_s = settings.target_timeout_s * max(1, max_calls) + 30
+        # Per-call budget must cover all httpx retries + their 429 wait intervals.
+        # Must mirror OpenAICompatTarget defaults in targets/base.py (retries=5, 429 cap=60 s).
+        _HTTP_RETRIES = 5
+        _MAX_429_WAIT_S = 60.0
+        per_call_s = settings.target_timeout_s * (_HTTP_RETRIES + 1) + _MAX_429_WAIT_S * _HTTP_RETRIES
+        timeout_s = per_call_s * max(1, max_calls) + 30
         out = await asyncio.wait_for(pn.run_attack(
             strategy=strategy_name, objective=obj.text, target=adapter, converter=conv, scorer=scorer,
             adversarial=adv, max_turns=max_turns,

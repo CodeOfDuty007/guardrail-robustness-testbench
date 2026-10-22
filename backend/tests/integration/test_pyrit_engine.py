@@ -391,3 +391,31 @@ def test_cancelled_run_is_finalised(env):
     with Session(get_engine()) as s:
         r = s.get(m.Run, rid)
         assert r.status == "error" and r.error == "Cancelled"
+
+
+def test_run_attempt_timeout_covers_http_retry_budget():
+    """Outer asyncio.wait_for budget must be >= worst-case httpx retry chain per call.
+
+    The orchestrator uses _HTTP_RETRIES=5 and _MAX_429_WAIT_S=60 (matching targets/base.py
+    defaults). A single logical send can take up to target_timeout_s*(retries+1) + 60*retries.
+    For 1 call this must exceed bare target_timeout_s.
+    """
+    import re
+
+    src = open("/Users/Nikhil/PyRIT project/backend/app/engine/orchestrator.py").read()
+    # Extract the three constant lines and the formula
+    http_r = int(re.search(r"_HTTP_RETRIES\s*=\s*(\d+)", src).group(1))
+    max_w = float(re.search(r"_MAX_429_WAIT_S\s*=\s*([\d.]+)", src).group(1))
+    # Formula: per_call_s = target_timeout_s * (_HTTP_RETRIES + 1) + _MAX_429_WAIT_S * _HTTP_RETRIES
+    target_timeout_s = 120.0
+    per_call_s = target_timeout_s * (http_r + 1) + max_w * http_r
+    # per_call_s must be strictly larger than bare target_timeout_s
+    assert per_call_s > target_timeout_s, (
+        f"per_call_s {per_call_s} <= target_timeout_s {target_timeout_s}: "
+        "retry budget not captured in outer timeout")
+    # constants must match targets/base.py
+    base_src = open("/Users/Nikhil/PyRIT project/backend/app/engine/targets/base.py").read()
+    assert f"retries: int = {http_r}" in base_src, (
+        f"_HTTP_RETRIES={http_r} in orchestrator does not match targets/base.py default")
+    assert f"{max_w}" in base_src, (
+        f"_MAX_429_WAIT_S={max_w} in orchestrator does not match 429 cap in targets/base.py")
