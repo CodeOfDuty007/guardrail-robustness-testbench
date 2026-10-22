@@ -83,6 +83,9 @@ class RunConfig(BaseModel):
     wrap_with_cipher: list[str] = Field(default_factory=list)
     defenses: list[str] = Field(default_factory=list)
     max_iterations: int = 1
+    pyrit_max_backtracks: int = Field(default=10, ge=0, le=50)   # Crescendo: refusal backtracks per turn (0 = no retries)
+    pyrit_tree_width: int = Field(default=2, ge=1, le=8)         # TAP: candidate branches per node
+    pyrit_branching_factor: int = Field(default=2, ge=1, le=8)   # TAP: children generated per node
     seed: int = settings.default_seed
     budget_usd: float | None = None
     concurrency: int = settings.max_concurrency
@@ -124,7 +127,8 @@ class RunState:
 
 class Metered:
     """Every model call (target, attacker, judge, guard) goes through here: shared concurrency
-    limit, hard 30s deadline, budget gate and cost accounting (SPEC §15)."""
+    limit, budget gate, and cost accounting (SPEC §15).  Per-request timeout is enforced by the
+    inner Target's httpx client; overall attack timeout by run_attempt_pyrit's asyncio.wait_for."""
 
     def __init__(self, inner: Target, st: RunState, role: str) -> None:
         self.inner, self.st, self.role = inner, st, role
@@ -135,7 +139,7 @@ class Metered:
             if self.st.over_budget():
                 self.st.stop = True
                 raise _BudgetHalt()
-            r = await asyncio.wait_for(self.inner.send(system, user), settings.target_timeout_s)
+            r = await self.inner.send(system, user)
             self.st.spent += r.cost_usd
             return r
 
@@ -416,15 +420,44 @@ async def run_attempt_pyrit(st: RunState, obj: Objective, strategy_name: str, ci
         cipher = get_cipher(cipher_name, cfg.seed)
         conv = pn.CipherConverter(cipher=cipher, prefix=strategy.prefix)
         adapter = await pn.make_adapter(target, obj.system_prompt)
-        adv = (await pn.make_adapter(attacker, "")) if attacker else pn.ScriptedAttacker(objective=obj.text)
+        if attacker:
+            adv: Any = await pn.make_adapter(attacker, "")
+            # use configured search parameters — real LLM can explore distinct branches
+            eff_backtracks = cfg.pyrit_max_backtracks
+            eff_width = cfg.pyrit_tree_width
+            eff_branching = cfg.pyrit_branching_factor
+        else:
+            adv = pn.ScriptedAttacker(objective=obj.text)
+            # ScriptedAttacker is stateless and always returns the same text, so any backtrack or
+            # branch produces an identical prompt. Set backtracks=0 (no retries) and width=1.
+            eff_backtracks = 0
+            eff_width = 1
+            eff_branching = 1
         adaptive = strategy_name in ("TAP", "PAIR")
         scorer = pn.threshold_scorer(obj.canary_literal) if adaptive else pn.substring_scorer(obj.canary_literal)
         _emit(st.run_id, "fsm", attempt_id=aid, state="DISPATCH")
         t0 = time.perf_counter()
+        max_turns = max(1, cfg.max_iterations)
+        # Per-strategy max serial call count.  PyRIT retries malformed attacker JSON up to
+        # _PYRIT_ATTACKER_RETRIES times, so each "attacker call" can consume that many timeouts.
+        _PYRIT_ATTACKER_RETRIES = 10  # matches PyRIT's RETRY_MAX_NUM_ATTEMPTS default (OpenAICompatTarget.retries=5 + PyRIT own)
+        att_factor = _PYRIT_ATTACKER_RETRIES + 1  # retries + the successful call
+        if strategy_name == "Crescendo":
+            # max_turns turns × (backtracks+1) attempts each; per attempt: att_factor attacker + 1 target
+            max_calls = max_turns * (eff_backtracks + 1) * (att_factor + 1)
+        elif strategy_name == "PAIR":
+            max_calls = eff_width * max_turns * (att_factor + 1)
+        elif strategy_name == "TAP":
+            max_calls = eff_width * eff_branching * max_turns * (att_factor + 1)
+        else:
+            max_calls = 1
+        timeout_s = settings.target_timeout_s * max(1, max_calls) + 30
         out = await asyncio.wait_for(pn.run_attack(
             strategy=strategy_name, objective=obj.text, target=adapter, converter=conv, scorer=scorer,
-            adversarial=adv, max_turns=max(1, cfg.max_iterations)),
-            settings.target_timeout_s * max(1, cfg.max_iterations) + 10)
+            adversarial=adv, max_turns=max_turns,
+            max_backtracks=eff_backtracks, tree_width=eff_width,
+            branching_factor=eff_branching),
+            timeout_s)
         text = redact(out["response"] or "")
         result = TargetResult(text, latency_ms=(time.perf_counter() - t0) * 1000, cost_usd=adapter.spent,
                               prompt_tokens=adapter.prompt_tokens, completion_tokens=adapter.completion_tokens)  # target-only; run-level spend is metered per call
@@ -432,12 +465,19 @@ async def run_attempt_pyrit(st: RunState, obj: Objective, strategy_name: str, ci
                                     injection=is_injection_objective(obj),
                                     judge=judge, judge_model=getattr(judge, "model", "regex-only") if judge else "regex-only",
                                     guard=guard)
-        metrics = conv.capture.last.as_dict() if conv.capture.last else {}
         instr_pyrit = cipher.decode_instruction()
-        ct_pyrit = conv.last_ciphertext
+        # All four winning-branch values are branch-accurate when a converter is configured:
+        # CipherConverter._last_by_task is keyed by asyncio.Task so each parallel PAIR/TAP branch
+        # writes its own slot; TargetAdapter reads its own slot and keys the result by response piece
+        # UUID, eliminating the last-call race in CipherConverter.last_* / capture.last.
+        plain_pyrit = out.get("winning_plaintext") or conv.last_plaintext or obj.text
+        ct_pyrit = out.get("winning_ciphertext") if out.get("winning_ciphertext") is not None else conv.last_ciphertext
+        metrics = out.get("winning_metrics") if out.get("winning_metrics") is not None else (
+            conv.capture.last.as_dict() if conv.capture.last else {})
         marker_pyrit = f"[CIPHER={cipher.name};SEED={cipher.seed}] {ct_pyrit}" if cipher.name != "NONE" else ct_pyrit
-        full_req_pyrit = f"{instr_pyrit}\n{marker_pyrit}".lstrip("\n") if instr_pyrit else marker_pyrit
-        _persist(st, aid, strategy=strategy_name, cipher_name=cipher_name, plaintext=conv.last_plaintext or obj.text,
+        full_req_pyrit = out.get("winning_request") or (
+            f"{instr_pyrit}\n{marker_pyrit}".lstrip("\n") if instr_pyrit else marker_pyrit)
+        _persist(st, aid, strategy=strategy_name, cipher_name=cipher_name, plaintext=plain_pyrit,
                  ciphertext=ct_pyrit, instr=instr_pyrit, cipher=cipher, metrics=metrics,
                  result=result, score=score, target_model=target.model_name, blocked=False, status=None,
                  iteration=(out.get("turns") or 1) - 1, obj=obj, full_request_sent=full_req_pyrit)

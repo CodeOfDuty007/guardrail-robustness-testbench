@@ -33,12 +33,12 @@ class Target(Protocol):
 class OpenAICompatTarget:
     """Any OpenAI-compatible endpoint: Ollama (/v1), vLLM, llama.cpp server, LM Studio, cloud.
 
-    This is the path used for GPU nodes. 30s hard timeout, exponential-backoff retries (SPEC §15).
+    This is the path used for GPU nodes. Hard timeout per call, exponential-backoff retries (SPEC §15).
     """
 
     def __init__(self, base_url: str, model_name: str, provider_id: int | None = None,
                  provider_kind: str = "openai_compat", timeout_s: float = 30.0,
-                 retries: int = 2, seed: int | None = None,
+                 retries: int = 5, seed: int | None = None,
                  price_prompt_1k: float = 0.0, price_completion_1k: float = 0.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.model_name, self.provider_kind = model_name, provider_kind
@@ -81,7 +81,7 @@ class OpenAICompatTarget:
                     import re
                     hint = e.response.headers.get("retry-after") or (re.search(r'"retryDelay":\s*"([\d.]+)s"', e.response.text) or [None, None])[1]
                     try:
-                        wait = min(float(hint) + 0.5, 15.0)
+                        wait = min(float(hint) + 0.5, 60.0)
                     except (TypeError, ValueError):
                         pass
                 await asyncio.sleep(wait)
