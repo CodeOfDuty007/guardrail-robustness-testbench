@@ -76,18 +76,20 @@ class OpenAICompatTarget:
                 if 400 <= code < 500 and code not in (408, 429):  # auth/billing/bad model: retrying cannot help
                     raise ProviderError(f"target {self.model_name} rejected the request (HTTP {code})") from None
                 last = e
-                wait = 0.5 * 2 ** attempt
-                if code == 429:  # honour the provider's own retry hint (Retry-After / Gemini retryDelay), capped
-                    import re
-                    hint = e.response.headers.get("retry-after") or (re.search(r'"retryDelay":\s*"([\d.]+)s"', e.response.text) or [None, None])[1]
-                    try:
-                        wait = min(float(hint) + 0.5, 60.0)
-                    except (TypeError, ValueError):
-                        pass
-                await asyncio.sleep(wait)
+                if attempt < self.retries:
+                    wait = 0.5 * 2 ** attempt
+                    if code == 429:  # honour the provider's own retry hint (Retry-After / Gemini retryDelay), capped
+                        import re
+                        hint = e.response.headers.get("retry-after") or (re.search(r'"retryDelay":\s*"([\d.]+)s"', e.response.text) or [None, None])[1]
+                        try:
+                            wait = min(float(hint) + 0.5, 60.0)
+                        except (TypeError, ValueError):
+                            pass
+                    await asyncio.sleep(wait)
             except (httpx.HTTPError, KeyError, ValueError) as e:
                 last = e
-                await asyncio.sleep(0.5 * 2 ** attempt)
+                if attempt < self.retries:
+                    await asyncio.sleep(0.5 * 2 ** attempt)
         if isinstance(last, httpx.TimeoutException):
             raise TimeoutError(f"target {self.model_name} timed out after {self.retries + 1} tries")
         raise ProviderError(f"target {self.model_name} failed after {self.retries + 1} tries: {type(last).__name__}")
