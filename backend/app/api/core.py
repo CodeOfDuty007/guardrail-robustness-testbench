@@ -266,13 +266,15 @@ def _explorer_query(model, session, q: str | None, eligible: bool, sort: str | N
     from sqlalchemy import String, cast, func, or_
     stmt = select(model)
     # run_id scoping: filter each table to only rows from a specific run.
-    # Attempts and payloads/responses/judgments use different join paths.
     # Exclude in-flight (status="running") attempts so the count always matches payloads.
-    if model is m.Attempt:
+    if model is m.Run:
+        if run_id is not None:
+            stmt = stmt.where(m.Run.id == run_id)
+    elif model is m.Attempt:
         stmt = stmt.where(m.Attempt.status != "running")
         if run_id is not None:
             stmt = stmt.where(m.Attempt.run_id == run_id)
-    elif model in (m.Payload, m.Response):
+    elif model in (m.Payload, m.Response, m.DefenseApplied):
         if run_id is not None:
             stmt = stmt.join(m.Attempt, m.Attempt.id == model.attempt_id).where(m.Attempt.run_id == run_id)
     elif model is m.Judgment:
@@ -280,6 +282,7 @@ def _explorer_query(model, session, q: str | None, eligible: bool, sort: str | N
             stmt = stmt.where(m.Judgment.filter_evaded == True, m.Judgment.semantic_complied == True)  # noqa: E712
         if run_id is not None:
             stmt = stmt.join(m.Attempt, m.Attempt.id == m.Judgment.attempt_id).where(m.Attempt.run_id == run_id)
+    # m.Disclosure has no attempt/run linkage; run_id is silently ignored for that table.
     if q:
         stmt = stmt.where(or_(*[cast(c, String).ilike(f"%{q}%") for c in model.__table__.c]))
     total = session.exec(select(func.count()).select_from(stmt.subquery())).one()
