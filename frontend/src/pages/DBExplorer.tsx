@@ -35,7 +35,7 @@ export default function DBExplorer() {
   useEffect(() => { window.clearTimeout(qTimer.current); qTimer.current = window.setTimeout(() => { setQDeb(q); setPage(0) }, 250) }, [q])
   useEffect(() => { window.clearTimeout(ridTimer.current); ridTimer.current = window.setTimeout(() => { setRunIdDeb(runId); setPage(0) }, 400) }, [runId])
 
-  const runIdParam = runIdDeb.trim() ? `&run_id=${encodeURIComponent(runIdDeb.trim())}` : ''
+  const runIdParam = runIdDeb.trim() && tab !== 'disclosures' ? `&run_id=${encodeURIComponent(runIdDeb.trim())}` : ''
   const params = `limit=${PAGE}&offset=${page * PAGE}&sort=${sort.id}&desc=${sort.desc}&q=${encodeURIComponent(qDeb)}${eligible && tab === 'judgments' ? '&eligible=true' : ''}${runIdParam}`
   const d = useGet<{ total: number; rows: any[] }>(`/api/explorer/${tab}?${params}`, [tick])
   useEffect(() => connectLive(null, (e) => { if (e.type === 'attempt') { setLive((n) => n + 1); setTick((t) => (t + 1) % 1e9) } }), []) // live row-count ticker
