@@ -261,11 +261,25 @@ def _scope_of(table: str, rows: list[dict], s: Session) -> dict:
             "seeds": sorted({r.seed for r in runs})}
 
 
-def _explorer_query(model, session, q: str | None, eligible: bool, sort: str | None, desc: bool):
+def _explorer_query(model, session, q: str | None, eligible: bool, sort: str | None, desc: bool,
+                    run_id: int | None = None):
     from sqlalchemy import String, cast, func, or_
     stmt = select(model)
-    if eligible and model is m.Judgment:
-        stmt = stmt.where(m.Judgment.filter_evaded == True, m.Judgment.semantic_complied == True)  # noqa: E712
+    # run_id scoping: filter each table to only rows from a specific run.
+    # Attempts and payloads/responses/judgments use different join paths.
+    # Exclude in-flight (status="running") attempts so the count always matches payloads.
+    if model is m.Attempt:
+        stmt = stmt.where(m.Attempt.status != "running")
+        if run_id is not None:
+            stmt = stmt.where(m.Attempt.run_id == run_id)
+    elif model in (m.Payload, m.Response):
+        if run_id is not None:
+            stmt = stmt.join(m.Attempt, m.Attempt.id == model.attempt_id).where(m.Attempt.run_id == run_id)
+    elif model is m.Judgment:
+        if eligible:
+            stmt = stmt.where(m.Judgment.filter_evaded == True, m.Judgment.semantic_complied == True)  # noqa: E712
+        if run_id is not None:
+            stmt = stmt.join(m.Attempt, m.Attempt.id == m.Judgment.attempt_id).where(m.Attempt.run_id == run_id)
     if q:
         stmt = stmt.where(or_(*[cast(c, String).ilike(f"%{q}%") for c in model.__table__.c]))
     total = session.exec(select(func.count()).select_from(stmt.subquery())).one()
@@ -276,18 +290,20 @@ def _explorer_query(model, session, q: str | None, eligible: bool, sort: str | N
 
 @router.get("/api/explorer/{table}")
 def explorer(table: str, limit: int = 100, offset: int = 0, q: str | None = None, eligible: bool = False,
-             sort: str | None = None, desc: bool = True, s: Session = Depends(get_telemetry_session)):
+             sort: str | None = None, desc: bool = True, run_id: int | None = None,
+             s: Session = Depends(get_telemetry_session)):
     model = TABLES.get(table)
     if not model:
         raise HTTPException(404, "unknown table")
-    stmt, total = _explorer_query(model, s, q, eligible, sort, desc)
+    stmt, total = _explorer_query(model, s, q, eligible, sort, desc, run_id=run_id)
     rows = [r.model_dump() for r in s.exec(stmt.offset(max(0, offset)).limit(min(max(1, limit), 1000))).all()]
     return {"total": total, "rows": rows, "offset": offset}
 
 
 @router.get("/api/explorer/{table}/export")
 def explorer_export(table: str, format: str = "csv", redact: bool = True, q: str | None = None,
-                    eligible: bool = False, s: Session = Depends(get_telemetry_session)):
+                    eligible: bool = False, run_id: int | None = None,
+                    s: Session = Depends(get_telemetry_session)):
     """Exports carry a provenance header; raw payloads/responses are redacted unless redact=false (SPEC §1)."""
     import csv
     import io
@@ -297,7 +313,7 @@ def explorer_export(table: str, format: str = "csv", redact: bool = True, q: str
     model = TABLES.get(table)
     if not model:
         raise HTTPException(404, "unknown table")
-    stmt, total = _explorer_query(model, s, q, eligible, None, False)
+    stmt, total = _explorer_query(model, s, q, eligible, None, False, run_id=run_id)
     rows = [r.model_dump(mode="json") for r in s.exec(stmt.limit(EXPORT_CAP)).all()]
     if redact:
         for r in rows:
