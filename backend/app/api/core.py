@@ -291,6 +291,11 @@ def _explorer_query(model, session, q: str | None, eligible: bool, sort: str | N
     return stmt.order_by(col.desc() if desc else col.asc()), total
 
 
+def _check_run_id(model, run_id: int | None) -> None:
+    if run_id is not None and model is m.Disclosure:
+        raise HTTPException(400, "disclosures have no run linkage — omit run_id for this table")
+
+
 @router.get("/api/explorer/{table}")
 def explorer(table: str, limit: int = 100, offset: int = 0, q: str | None = None, eligible: bool = False,
              sort: str | None = None, desc: bool = True, run_id: int | None = None,
@@ -298,6 +303,7 @@ def explorer(table: str, limit: int = 100, offset: int = 0, q: str | None = None
     model = TABLES.get(table)
     if not model:
         raise HTTPException(404, "unknown table")
+    _check_run_id(model, run_id)
     stmt, total = _explorer_query(model, s, q, eligible, sort, desc, run_id=run_id)
     rows = [r.model_dump() for r in s.exec(stmt.offset(max(0, offset)).limit(min(max(1, limit), 1000))).all()]
     return {"total": total, "rows": rows, "offset": offset}
@@ -316,6 +322,7 @@ def explorer_export(table: str, format: str = "csv", redact: bool = True, q: str
     model = TABLES.get(table)
     if not model:
         raise HTTPException(404, "unknown table")
+    _check_run_id(model, run_id)
     stmt, total = _explorer_query(model, s, q, eligible, None, False, run_id=run_id)
     rows = [r.model_dump(mode="json") for r in s.exec(stmt.limit(EXPORT_CAP)).all()]
     if redact:

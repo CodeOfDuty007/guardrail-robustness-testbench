@@ -72,7 +72,10 @@ export default function DBExplorer() {
       <Card>
         <div className="row">
           <input aria-label="Search rows" placeholder="full-text search…" value={q} onChange={(e) => setQ(e.target.value)} style={{ maxWidth: 320 }} />
-          <input aria-label="Filter by run ID" placeholder="run ID…" value={runId} onChange={(e) => setRunId(e.target.value)} style={{ maxWidth: 100 }} title="Filter all tabs to a single run" />
+          <input aria-label="Filter by run ID" placeholder="run ID…" value={runId}
+            onChange={(e) => setRunId(e.target.value)} style={{ maxWidth: 100 }}
+            disabled={tab === 'disclosures'}
+            title={tab === 'disclosures' ? 'Disclosures have no run linkage — filter not available' : 'Filter all tabs to a single run'} />
           {tab === 'judgments' && <label className="row" style={{ margin: 0, textTransform: 'none' }}><input type="checkbox" checked={eligible} onChange={(e) => { setEligible(e.target.checked); setPage(0) }} /> Promote-eligible only</label>}
           <span className="mono" aria-live="polite">{d.data?.total ?? 0} rows</span>
           {live > 0 && <Pill tone="blue">+{live} live</Pill>}
