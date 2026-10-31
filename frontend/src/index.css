@@ -14,7 +14,7 @@ code, pre, .mono, td, input, select, textarea { font-family: var(--mono); font-s
 .nav a { display: block; padding: var(--sp-2) var(--sp-3); color: var(--text); text-decoration: none; border: 2px solid transparent; font-size: 24px; text-transform: uppercase; }
 .nav a:hover { border-color: var(--border); background: var(--surface-2); }
 .nav a.active { background: var(--primary); color: #fff; box-shadow: 4px 4px 0 var(--secondary); }
-.main { padding: var(--sp-5) var(--sp-6); max-width: 1500px; width: 100%; }
+.main { padding: var(--sp-5) var(--sp-6); width: 100%; min-width: 0; }
 @media (max-width: 860px) { .app { grid-template-columns: 1fr; } .side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; } .main { padding: var(--sp-4); } }
 
 .card { background: var(--surface); border: 2px solid var(--border); padding: var(--sp-4); margin: 15px 15px var(--sp-5) 0; }
@@ -64,6 +64,8 @@ tr:hover td { background: var(--surface-2); }
 .fsm { display: flex; gap: 2px; margin-bottom: var(--sp-2); }
 .fsm span { font-family: var(--pixel); font-size: 17px; padding: 0 6px; background: var(--surface-2); color: var(--muted); }
 .fsm span.on { background: var(--secondary); color: var(--ink); }
+.fsm span.done { background: var(--surface-2); color: var(--text); }
+.fsm span.skip { opacity: 0.35; text-decoration: line-through; }
 .bar { height: 10px; background: var(--surface-2); } .bar > i { display: block; height: 100%; background: var(--primary); }
 .drawer { position: fixed; inset: 0 0 0 auto; width: min(640px, 100%); background: var(--surface); border-left: 4px solid var(--secondary); padding: var(--sp-5); overflow: auto; z-index: 10; box-shadow: -8px 0 0 var(--primary); }
 .modal { position: fixed; inset: 0; background: #000c; display: grid; place-items: center; z-index: 20; padding: var(--sp-4); }

@@ -4,16 +4,15 @@ import { useSearchParams } from 'react-router-dom'
 import { Btn, Card, Pill, StatusPill } from '../components/ui'
 import { useGet } from '../hooks/useApi'
 import { post } from '../lib/api'
+import { fsmSteps, pushState } from '../lib/fsm'
 import { connectLive, type LiveEvent } from '../lib/ws'
-
-const STATES = ['GENERATE', 'MUTATE', 'DISPATCH', 'EVALUATE', 'PERSIST', 'ADAPT']
 
 export default function LiveConsole() {
   const [sp, setSp] = useSearchParams()
   const runId = sp.get('run') ? Number(sp.get('run')) : null
   const runs = useGet<any[]>('/api/runs')
   const [events, setEvents] = useState<LiveEvent[]>([])
-  const [fsm, setFsm] = useState<Record<number, string>>({})
+  const [fsm, setFsm] = useState<Record<number, string[]>>({})
   const [runStatus, setRunStatus] = useState<string>('')
   const [up, setUp] = useState(false)
   const [promoted, setPromoted] = useState<Record<number, string>>({})
@@ -22,7 +21,7 @@ export default function LiveConsole() {
     setEvents([]); setFsm({})
     return connectLive(runId, (e) => {
       if (e.type === 'attempt') setEvents((p) => [e, ...p].slice(0, 200))
-      else if (e.type === 'fsm') setFsm((s) => ({ ...s, [e.attempt_id]: e.state }))
+      else if (e.type === 'fsm') setFsm((s) => ({ ...s, [e.attempt_id]: pushState(s[e.attempt_id], e.state) }))
       else if (e.type === 'run') { setRunStatus(e.status); runs.reload() }
     }, setUp)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -52,7 +51,7 @@ export default function LiveConsole() {
         <AnimatePresence initial={false}>
           {events.map((e) => (
             <motion.div key={e.attempt_id} layout initial={{ opacity: 0, y: -16 }} animate={{ opacity: 1, y: 0 }} className={`term ${e.promote_eligible ? 'hit' : ''}`}>
-              <div className="fsm" aria-label={`state ${fsm[e.attempt_id] ?? 'DONE'}`}>{STATES.map((s) => <span key={s} className={(fsm[e.attempt_id] ?? 'ADAPT') === s ? 'on' : ''}>{s}</span>)}</div>
+              <div className="fsm" aria-label={`state ${fsm[e.attempt_id]?.slice(-1)[0] ?? 'pending'}`}>{fsmSteps(fsm[e.attempt_id]).map((s) => <span key={s.state} className={s.cls}>{s.state}</span>)}</div>
               <div className="row"><Pill tone="blue">#{e.attempt_id}</Pill><b>{e.strategy}</b><span>×</span><b>{e.cipher}</b><span className="muted">iter {e.iteration} · {e.objective_id} · {e.target_model}</span></div>
               <div><span className="tag">[plaintext]</span> <span className="val">{e.plaintext}</span></div>
               <div><span className="tag">[payload]</span> <span className="val">{e.ciphertext}</span></div>

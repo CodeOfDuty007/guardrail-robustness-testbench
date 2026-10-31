@@ -140,7 +140,7 @@ def correlation(metric: str = Query("avalanche_score"), scope: str = Query("all"
     if out["logistic"]:
         xs = np.linspace(min(r[metric] for r in rows), max(r[metric] for r in rows), 40)
         b0, b1 = out["logistic"]["intercept"], out["logistic"]["coef"]
-        out["curve"] = [{"x": float(a), "p": float(1 / (1 + math.exp(-(b0 + b1 * a))))} for a in xs]
+        out["curve"] = [{"x": float(a), "p": float(1 / (1 + math.exp(-max(-700.0, min(700.0, b0 + b1 * a)))))} for a in xs]
     return out
 
 

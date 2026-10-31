@@ -239,7 +239,8 @@ TABLES = {"runs": m.Run, "attempts": m.Attempt, "payloads": m.Payload, "response
 
 
 EXPORT_CAP = 100_000
-REDACT_COLS = {"payloads": ["plaintext_prompt", "ciphertext_payload", "decode_instruction"],
+REDACT_COLS = {"payloads": ["plaintext_prompt", "ciphertext_payload", "decode_instruction",
+                         "full_request_sent", "reproduction_steps"],
                "responses": ["target_response"], "judgments": ["judge_rationale"], "defenses": ["transformed_payload"]}
 
 
@@ -281,7 +282,7 @@ def _explorer_query(model, session, q: str | None, eligible: bool, sort: str | N
         if eligible:
             stmt = stmt.where(m.Judgment.filter_evaded == True, m.Judgment.semantic_complied == True)  # noqa: E712
         if run_id is not None:
-            stmt = stmt.join(m.Attempt, m.Attempt.id == m.Judgment.attempt_id).where(m.Attempt.run_id == run_id)
+            stmt = stmt.join(m.Attempt, m.Attempt.id == m.Judgment.attempt_id).where(m.Attempt.run_id == run_id)  # type: ignore[arg-type]
     # m.Disclosure has no attempt/run linkage; run_id is silently ignored for that table.
     if q:
         stmt = stmt.where(or_(*[cast(c, String).ilike(f"%{q}%") for c in model.__table__.c]))

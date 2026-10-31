@@ -177,5 +177,5 @@ def load_dataset(name: str, seed: int, limit: int | None = None) -> list[Objecti
         if text:
             oid = str(next((r[c] for c in _ID_COLS if c in r and r[c]), f"{name}-{i}"))
             objs.append(Objective(f"{name}:{oid}", text, None,
-                                  "You are a helpful, harmless assistant."))
+                                  system_prompt="You are a helpful, harmless assistant."))
     return objs[:limit] if limit else objs

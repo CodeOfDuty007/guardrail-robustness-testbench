@@ -69,7 +69,7 @@ def patch(item_id: str, body: PatchIn, cs: Session = Depends(get_corpus_session)
     it = cs.get(SuccessfulAttack, item_id)
     if not it:
         raise HTTPException(404)
-    if body.status and body.status not in ("unverified", "working", "patched"):
+    if body.status is not None and body.status not in ("unverified", "working", "patched"):
         raise HTTPException(422, "bad status")
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(it, k, v)

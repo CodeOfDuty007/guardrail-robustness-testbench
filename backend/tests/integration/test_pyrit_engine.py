@@ -402,8 +402,9 @@ def test_run_attempt_timeout_covers_http_retry_budget():
     (i.e. the sleep is guarded by `if attempt < self.retries`).
     """
     import re
+    from pathlib import Path
 
-    src = open("/Users/Nikhil/PyRIT project/backend/app/engine/orchestrator.py").read()
+    src = (Path(__file__).resolve().parents[2] / "app/engine/orchestrator.py").read_text()
     http_r = int(re.search(r"_HTTP_RETRIES\s*=\s*(\d+)", src).group(1))
     max_w = float(re.search(r"_MAX_429_WAIT_S\s*=\s*([\d.]+)", src).group(1))
     target_timeout_s = 120.0
@@ -411,7 +412,7 @@ def test_run_attempt_timeout_covers_http_retry_budget():
     assert per_call_s > target_timeout_s, (
         f"per_call_s {per_call_s} <= target_timeout_s {target_timeout_s}: "
         "retry budget not captured in outer timeout")
-    base_src = open("/Users/Nikhil/PyRIT project/backend/app/engine/targets/base.py").read()
+    base_src = (Path(__file__).resolve().parents[2] / "app/engine/targets/base.py").read_text()
     assert f"retries: int = {http_r}" in base_src, (
         f"_HTTP_RETRIES={http_r} in orchestrator does not match targets/base.py default")
     assert f"{max_w}" in base_src, (

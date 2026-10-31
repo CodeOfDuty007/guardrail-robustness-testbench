@@ -483,9 +483,9 @@ async def run_attempt_pyrit(st: RunState, obj: Objective, strategy_name: str, ci
         full_req_pyrit = out.get("winning_request") or (
             f"{instr_pyrit}\n{marker_pyrit}".lstrip("\n") if instr_pyrit else marker_pyrit)
         _persist(st, aid, strategy=strategy_name, cipher_name=cipher_name, plaintext=plain_pyrit,
-                 ciphertext=ct_pyrit, instr=instr_pyrit, cipher=cipher, metrics=metrics,
+                 ciphertext=ct_pyrit, instr=instr_pyrit, cipher=cipher, metrics=metrics,  # type: ignore[arg-type]
                  result=result, score=score, target_model=target.model_name, blocked=False, status=None,
-                 iteration=(out.get("turns") or 1) - 1, obj=obj, full_request_sent=full_req_pyrit)
+                 iteration=(out.get("turns") or 1) - 1, obj=obj, full_request_sent=full_req_pyrit)  # type: ignore[arg-type]
         _emit(st.run_id, "fsm", attempt_id=aid, state="DONE" if score.confirmed else "ADAPT")
         return score
     except BaseException:

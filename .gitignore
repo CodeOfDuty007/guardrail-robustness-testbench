@@ -16,3 +16,4 @@ __pycache__/
 backend/.tmp/
 .DS_Store
 *.pyc
+.claude/
