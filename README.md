@@ -154,6 +154,14 @@ cd backend
 .venv/bin/pytest
 ```
 
+GitHub Actions runs `.github/workflows/ci.yml` on pushes to `main`, pull requests, and
+manual dispatches. Each run starts with a fresh checkout on Ubuntu. The backend job checks
+that the corpus package files are tracked and do not match Git ignore rules, installs the
+project's `.[dev]` dependencies with `uv` and Python 3.12, imports the application modules,
+and runs the full backend test suite with the built-in simulated target. The separate
+frontend job installs the lockfile dependencies with `npm ci` on Node.js 22 and runs
+`npm run build`. Neither job needs model credentials or GPU hardware.
+
 To run the full stack under Docker Compose instead:
 
 ```bash
